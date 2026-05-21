@@ -130,4 +130,22 @@ if [[ -n "${CIB_SERVICES:-}" ]]; then
     /usr/local/bin/cib-services start "${CIB_SERVICES}"
 fi
 
+# Claude Code refuses --dangerously-skip-permissions under root for safety,
+# so the control plane (which spawns Claude) must run unprivileged. Network
+# setup above needed root (nftables / NET_ADMIN). Hand off to the
+# unprivileged `coder` user now. The bind-mounted volumes are chowned so
+# Claude Code can write its credentials + transcripts there.
+if [[ "$(id -u)" -eq 0 ]] && [[ "${CIB_RUN_AS_ROOT:-0}" != "1" ]]; then
+    for d in /workspace /var/lib/claude-in-box /home/coder/.claude; do
+        if [[ -d "$d" ]]; then
+            chown -R coder:coder "$d" 2>/dev/null || true
+        fi
+    done
+    # `runuser` keeps the env, including the proxy-stripped one we just set.
+    # `--preserve-environment` is the default; passing -- separates options
+    # from the command to exec.
+    log "dropping privileges → coder"
+    exec runuser -u coder -- "$@"
+fi
+
 exec "$@"

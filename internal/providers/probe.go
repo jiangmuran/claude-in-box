@@ -27,7 +27,9 @@ type Probe struct {
 //   404       → wrong path / not Anthropic-compatible
 //   network   → bad host
 func ProbeProvider(ctx context.Context, p Provider) Probe {
-	endpoint := p.APIHost + "/v1/models"
+	// `?limit=1` keeps the response small on first-party Anthropic. Third
+	// parties usually ignore it.
+	endpoint := p.APIHost + "/v1/models?limit=1"
 	out := Probe{Endpoint: endpoint}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -35,6 +37,11 @@ func ProbeProvider(ctx context.Context, p Provider) Probe {
 		out.Detail = "build request: " + err.Error()
 		return out
 	}
+	// Send BOTH auth headers — `Authorization: Bearer` for community
+	// gateways (claude-code-router, OneAPI, …) and `x-api-key` for direct
+	// Anthropic console keys. Upstream uses whichever it recognises;
+	// only one needs to validate for a 200.
+	req.Header.Set("Authorization", "Bearer "+p.APIKey)
 	req.Header.Set("x-api-key", p.APIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 

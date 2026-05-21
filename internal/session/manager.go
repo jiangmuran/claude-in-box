@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -279,16 +280,35 @@ func (m *Manager) commandFor(opts SpawnOptions) (string, []string, error) {
 func (m *Manager) envFor(opts SpawnOptions, additional ...string) []string {
 	env := os.Environ()
 	overrides := map[string]string{}
+	// Decide which Anthropic auth env to inject. Per the Claude Code docs
+	// (code.claude.com/docs/en/env-vars):
+	//   ANTHROPIC_API_KEY   → X-Api-Key header — direct Anthropic console keys
+	//   ANTHROPIC_AUTH_TOKEN → Authorization: Bearer <value> — gateways/proxies
+	// When a third-party provider host is in ExtraEnv (ANTHROPIC_BASE_URL set),
+	// we default to AUTH_TOKEN because most community gateways
+	// (claude-code-router, OneAPI, etc.) speak Bearer auth.
+	thirdParty := false
+	for _, kv := range opts.ExtraEnv {
+		if strings.HasPrefix(kv, "ANTHROPIC_BASE_URL=") {
+			thirdParty = true
+			break
+		}
+	}
 	switch opts.AuthMode {
 	case "api_key":
 		if opts.APIKey != "" {
-			overrides["ANTHROPIC_API_KEY"] = opts.APIKey
+			if thirdParty {
+				overrides["ANTHROPIC_AUTH_TOKEN"] = opts.APIKey
+			} else {
+				overrides["ANTHROPIC_API_KEY"] = opts.APIKey
+			}
 			delete(overrides, "CLAUDE_CODE_OAUTH_TOKEN")
 		}
 	case "subscription":
 		if opts.OAuthToken != "" {
 			overrides["CLAUDE_CODE_OAUTH_TOKEN"] = opts.OAuthToken
 			delete(overrides, "ANTHROPIC_API_KEY")
+			delete(overrides, "ANTHROPIC_AUTH_TOKEN")
 		}
 	}
 	// Make CC quieter for our needs; the user can re-enable.

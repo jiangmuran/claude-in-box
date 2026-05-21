@@ -1,10 +1,4 @@
 // Command cib is the claude-in-box control plane.
-//
-// M1.1 scaffold: brings up an HTTP server on the configured address, requires
-// CIB_AUTH_TOKEN to be set (unless CIB_AUTH_DISABLED=1), exposes /api/health,
-// and serves a placeholder index on / when CIB_MODE is unset (the default).
-// The session manager, transports, hooks runtime, and Web UI bundle land in
-// subsequent M1 sub-tasks.
 package main
 
 import (
@@ -16,11 +10,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jiangmuran/claude-in-box/internal/auth"
+	"github.com/jiangmuran/claude-in-box/internal/server"
+	"github.com/jiangmuran/claude-in-box/internal/session"
 )
 
 const (
@@ -38,6 +35,7 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	addr := flag.String("addr", defaultAddr, "listen address")
 	dataDir := flag.String("data-dir", defaultDataDir, "directory for tokens.json, sessions/, etc.")
+	claudeBin := flag.String("claude-bin", "", "absolute path to the claude binary (default: PATH lookup)")
 	flag.Parse()
 
 	if *showVersion {
@@ -47,13 +45,13 @@ func main() {
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 
-	if err := run(*addr, *dataDir); err != nil {
+	if err := run(*addr, *dataDir, *claudeBin); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(addr, dataDir string) error {
+func run(addr, dataDir, claudeBin string) error {
 	authToken := os.Getenv("CIB_AUTH_TOKEN")
 	authDisabled := os.Getenv("CIB_AUTH_DISABLED") == "1"
 	if authToken == "" && !authDisabled {
@@ -70,7 +68,11 @@ func run(addr, dataDir string) error {
 		return fmt.Errorf("unknown CIB_MODE %q (want \"\" / \"default\" / \"headless\")", mode)
 	}
 
-	tokenStore, err := auth.NewFileStore(dataDir + "/tokens.json")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return fmt.Errorf("mkdir data-dir: %w", err)
+	}
+
+	tokenStore, err := auth.NewFileStore(filepath.Join(dataDir, "tokens.json"))
 	if err != nil {
 		return fmt.Errorf("init token store: %w", err)
 	}
@@ -79,7 +81,20 @@ func run(addr, dataDir string) error {
 			return fmt.Errorf("register master token: %w", err)
 		}
 	}
-	_ = tokenStore // M1.5 wires this into the route middleware.
+
+	sessionMgr, err := session.NewManager(filepath.Join(dataDir, "sessions"), claudeBin)
+	if err != nil {
+		return fmt.Errorf("init session manager: %w", err)
+	}
+	sessionMgr.ControlAddr = loopbackAddr(addr)
+
+	srv := server.New(server.Config{
+		Mode:     mode,
+		Sessions: sessionMgr,
+		Tokens:   tokenStore,
+		Version:  version,
+		Commit:   commit,
+	})
 
 	slog.Info("starting",
 		"version", version,
@@ -88,27 +103,17 @@ func run(addr, dataDir string) error {
 		"data_dir", dataDir,
 		"mode", mode,
 		"auth_disabled", authDisabled,
+		"hook_loopback", sessionMgr.ControlAddr,
 	)
 
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","version":%q,"commit":%q,"mode":%q}`, version, commit, mode)
-	})
-
-	if mode == "default" {
-		mux.HandleFunc("GET /{$}", placeholderIndex)
-	}
-
-	srv := &http.Server{
+	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           withLogging(mux),
+		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ListenAndServe() }()
+	go func() { errCh <- httpSrv.ListenAndServe() }()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -123,51 +128,22 @@ func run(addr, dataDir string) error {
 		slog.Info("shutdown signal received")
 		shCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return srv.Shutdown(shCtx)
+		return httpSrv.Shutdown(shCtx)
 	}
 }
 
-func placeholderIndex(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, `<!doctype html><meta charset="utf-8"><title>claude-in-box</title>
-<style>
-  body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;max-width:42rem;margin:5rem auto;padding:0 1rem;color:#4a3a2e;background:#f5f0e8;line-height:1.55}
-  h1{color:#b85a3d;font-weight:700;font-size:2.5rem;letter-spacing:-.02em;margin-bottom:.25em}
-  .tag{color:#7a6452;margin-top:0}
-  code{background:#eadbcd;padding:.1rem .35rem;border-radius:.25rem;font-size:.9em}
-  a{color:#b85a3d}
-</style>
-<h1>claude-in-box</h1>
-<p class="tag">Portable Claude Code dev environment with sessions, hooks, and a web API.</p>
-<p>The control plane is up. The full Web UI lands in M2.</p>
-<p>Health: <code>GET /api/health</code></p>
-<p>Source: <a href="https://github.com/jiangmuran/claude-in-box">github.com/jiangmuran/claude-in-box</a></p>`)
-}
-
-func withLogging(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t := time.Now()
-		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		h.ServeHTTP(rec, r)
-		if strings.HasPrefix(r.URL.Path, "/api/health") {
-			return
-		}
-		slog.Info("http",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", rec.status,
-			"dur_ms", time.Since(t).Milliseconds(),
-			"remote", r.RemoteAddr,
-		)
-	})
-}
-
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
-
-func (s *statusRecorder) WriteHeader(code int) {
-	s.status = code
-	s.ResponseWriter.WriteHeader(code)
+// loopbackAddr converts the listen address into the host:port form a process
+// inside the same container should use to call us back over loopback. ":8080"
+// or "0.0.0.0:8080" → "127.0.0.1:8080"; otherwise unchanged.
+func loopbackAddr(addr string) string {
+	switch {
+	case strings.HasPrefix(addr, ":"):
+		return "127.0.0.1" + addr
+	case strings.HasPrefix(addr, "0.0.0.0:"):
+		return "127.0.0.1:" + strings.TrimPrefix(addr, "0.0.0.0:")
+	case strings.HasPrefix(addr, "[::]:"):
+		return "127.0.0.1:" + strings.TrimPrefix(addr, "[::]:")
+	default:
+		return addr
+	}
 }

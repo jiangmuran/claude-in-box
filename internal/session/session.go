@@ -62,6 +62,41 @@ func (s *Session) Bus() *stream.Bus { return s.bus }
 // HookToken returns the session's hook callback token.
 func (s *Session) HookToken() string { return s.hookToken }
 
+// Status is an immutable snapshot of a session's externally visible state.
+// Use this from API handlers; direct field reads on Session race with the
+// reaper goroutine which writes StoppedAt / ExitCode at process exit.
+type Status struct {
+	ID        string       `json:"id"`
+	Workdir   string       `json:"workdir"`
+	Model     string       `json:"model,omitempty"`
+	AuthMode  string       `json:"auth_mode,omitempty"`
+	State     stream.State `json:"state"`
+	CreatedAt time.Time    `json:"created_at"`
+	StartedAt time.Time    `json:"started_at,omitempty"`
+	StoppedAt time.Time    `json:"stopped_at,omitempty"`
+	ExitCode  int          `json:"exit_code,omitempty"`
+	LastSeq   uint64       `json:"last_seq"`
+}
+
+// Snapshot returns the session's current externally visible state in a
+// race-free way.
+func (s *Session) Status() Status {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return Status{
+		ID:        s.ID,
+		Workdir:   s.Workdir,
+		Model:     s.Model,
+		AuthMode:  s.AuthMode,
+		State:     s.State(),
+		CreatedAt: s.CreatedAt,
+		StartedAt: s.StartedAt,
+		StoppedAt: s.StoppedAt,
+		ExitCode:  s.ExitCode,
+		LastSeq:   s.bus.LastSeq(),
+	}
+}
+
 // State returns the current high-level session state.
 func (s *Session) State() stream.State {
 	if v := s.state.Load(); v != nil {

@@ -171,9 +171,11 @@ func (m *Manager) Spawn(ctx context.Context, opts SpawnOptions) (*Session, error
 	m.sessions[id] = sess
 	m.mu.Unlock()
 
-	// Goroutine: feed the PTY's output into the parser.
+	// Goroutine: feed the PTY's output into the parser. Use RunRaw because
+	// the spawned claude is an interactive REPL (no --print/stream-json),
+	// so its stdout is ANSI/TUI bytes, not JSONL.
 	go func() {
-		_ = sess.parser.Run(context.Background(), master)
+		_ = sess.parser.RunRaw(context.Background(), master)
 	}()
 
 	// Goroutine: wait for the process to exit; tear down.

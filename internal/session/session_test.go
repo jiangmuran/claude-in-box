@@ -49,10 +49,29 @@ func TestManager_SpawnAndParseFrames(t *testing.T) {
 		kinds = append(kinds, f.Kind)
 	}
 
-	requireKind(t, kinds, stream.KindTextDelta)
-	requireKind(t, kinds, stream.KindTodoUpdate)
-	requireKind(t, kinds, stream.KindUsage)
+	// Interactive REPL mode (the production spawn path) does not emit
+	// JSONL — claude only does that with --print --output-format
+	// stream-json. So we no longer expect text.delta / todo.update etc
+	// from a vanilla session spawn; what we DO expect is the stub's bytes
+	// to come through as pty.raw frames, plus the lifecycle markers.
+	requireKind(t, kinds, stream.KindPTYRaw)
 	requireKind(t, kinds, stream.KindStop)
+
+	// Sanity: at least one pty.raw frame should contain the stub's
+	// recognisable JSON payload, so we know bytes are flowing through.
+	sawTextDelta := false
+	for _, f := range frames {
+		if f.Kind != stream.KindPTYRaw {
+			continue
+		}
+		if containsAny(string(f.Data), "text_delta", "todo_update", "usage") {
+			sawTextDelta = true
+			break
+		}
+	}
+	if !sawTextDelta {
+		t.Fatalf("no pty.raw frame contained stub's JSON markers")
+	}
 
 	if sess.State() != stream.StateStopped {
 		t.Fatalf("state = %q want stopped", sess.State())
@@ -181,4 +200,13 @@ func requireKind(t *testing.T, kinds []string, want string) {
 		}
 	}
 	t.Fatalf("kinds %v missing %q", kinds, want)
+}
+
+func containsAny(s string, needles ...string) bool {
+	for _, n := range needles {
+		if strings.Contains(s, n) {
+			return true
+		}
+	}
+	return false
 }

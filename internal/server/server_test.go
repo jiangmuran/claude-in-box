@@ -222,37 +222,37 @@ func TestSSEStreamsFrames(t *testing.T) {
 		t.Fatalf("ct = %q", ct)
 	}
 
-	// Read a bounded number of bytes; we should see "event: text.delta" and
-	// "event: usage" by then.
-	// Run the SSE read on a goroutine so we can bound it with a timeout.
-	type result struct{ text, usage bool }
+	// Interactive sessions now use RunRaw, so the stub's JSON lines come
+	// through as `pty.raw` frames. We just check the SSE wire is alive
+	// and surfacing frames.
+	type result struct{ raw, stop bool }
 	done := make(chan result, 1)
 	go func() {
 		rd := bufio.NewReader(res.Body)
 		var r result
-		for !(r.text && r.usage) {
+		for !(r.raw && r.stop) {
 			line, err := rd.ReadString('\n')
 			if err != nil {
 				done <- r
 				return
 			}
-			if strings.Contains(line, "event: text.delta") {
-				r.text = true
+			if strings.Contains(line, "event: pty.raw") {
+				r.raw = true
 			}
-			if strings.Contains(line, "event: usage") {
-				r.usage = true
+			if strings.Contains(line, "event: stop") {
+				r.stop = true
 			}
 		}
 		done <- r
 	}()
-	var seenText, seenUsage bool
+	var seenRaw, seenStop bool
 	select {
 	case r := <-done:
-		seenText, seenUsage = r.text, r.usage
+		seenRaw, seenStop = r.raw, r.stop
 	case <-time.After(3 * time.Second):
 	}
-	if !seenText || !seenUsage {
-		t.Fatalf("sse did not yield expected events: text=%v usage=%v", seenText, seenUsage)
+	if !seenRaw || !seenStop {
+		t.Fatalf("sse did not yield expected events: pty.raw=%v stop=%v", seenRaw, seenStop)
 	}
 }
 

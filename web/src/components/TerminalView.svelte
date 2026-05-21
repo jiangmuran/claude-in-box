@@ -3,6 +3,7 @@
   import { Terminal } from '@xterm/xterm'
   import { FitAddon } from '@xterm/addon-fit'
   import { WebLinksAddon } from '@xterm/addon-web-links'
+  import { api, ApiError } from '../lib/api'
   import { frames } from '../lib/stores'
   import type { Frame } from '../lib/types'
 
@@ -54,6 +55,17 @@
     term.open(host)
     fit.fit()
     term.writeln('\x1b[2m— attached to session ' + sessionId + ' —\x1b[0m')
+
+    // Wire keystrokes from xterm → PTY via the input API so the user
+    // can navigate Claude Code's TUI directly (theme picker, /resume,
+    // /init, prompts).
+    term.onData((data: string) => {
+      api.sendInput(sessionId, data).catch((e) => {
+        if (e instanceof ApiError) {
+          term?.write('\r\n\x1b[31m[input: ' + e.message + ']\x1b[0m\r\n')
+        }
+      })
+    })
   }
 
   onMount(() => {
@@ -65,20 +77,21 @@
 
   onDestroy(() => term?.dispose())
 
-  // Drain pty.raw frames into the terminal.
+  // Drain pty.raw frames into the terminal. The parser now emits raw byte
+  // chunks verbatim (including ANSI escapes and \r), so we DO NOT add any
+  // line endings — that was shredding Claude's TUI layout.
   frames.subscribe((fs: Frame[]) => {
     if (!term) return
     for (let i = lastWritten; i < fs.length; i++) {
       const f = fs[i]
       if (f.kind === 'pty.raw') {
         const text = (f.data as { text?: string })?.text ?? ''
-        // Restore line endings — the parser strips \r\n by ScanLines.
-        term.write(text + '\r\n')
+        term.write(text)
       } else if (f.kind === 'cc.raw') {
         const orig = (f.data as { original?: string })?.original ?? ''
-        term.write('\x1b[2m' + orig + '\x1b[0m\r\n')
+        term.write('\x1b[2m' + orig + '\x1b[0m')
       } else if (f.kind === 'stop') {
-        term.writeln('\x1b[31m— session stopped —\x1b[0m')
+        term.writeln('\r\n\x1b[31m— session stopped —\x1b[0m')
       }
     }
     lastWritten = fs.length

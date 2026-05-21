@@ -140,9 +140,12 @@ func TestIntegration_MultiTransportSameSession(t *testing.T) {
 	// Assert each transport sees the well-known kinds the stub emits.
 	// The stub does not generate a todo.update; the hook-driven path is
 	// covered separately by TestIntegration_HookCallbackEmitsFrame.
+	// Interactive sessions emit pty.raw + lifecycle frames; the stream-
+	// json structured kinds (text.delta etc) only come from the
+	// `--print --output-format stream-json` path, which is not used here.
 	for _, via := range []string{"ws", "rest", "aes"} {
 		ks := results[via]
-		for _, want := range []string{"text.delta", "usage", "stop"} {
+		for _, want := range []string{"pty.raw", "stop"} {
 			if !hasKind(ks, want) {
 				t.Fatalf("%s missing %q; got %v", via, want, ks)
 			}

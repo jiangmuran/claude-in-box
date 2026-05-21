@@ -141,20 +141,26 @@ if [[ "$(id -u)" -eq 0 ]] && [[ "${CIB_RUN_AS_ROOT:-0}" != "1" ]]; then
             chown -R coder:coder "$d" 2>/dev/null || true
         fi
     done
-    # Seed the user-level Claude Code settings so the welcome flow / theme
-    # picker / "skip permissions" confirmation do not greet the user every
-    # time they open a fresh shell and type `claude` directly. Idempotent:
-    # only write if the file is missing.
+    # Skip Claude Code's first-run theme picker by setting
+    # `hasCompletedOnboarding: true` at the TOP LEVEL of ~/.claude.json
+    # — verified against the v2.1.146 binary: that is the only key that
+    # gates the picker render. It lives in the user's global STATE file
+    # (~/.claude.json), NOT in ~/.claude/settings.json (different schema).
+    #
+    # Idempotent merge with jq so we never clobber oauthAccount /
+    # mcpServers / projects that might already be there from a prior
+    # login. Creates the file if absent.
     install -d -o coder -g coder -m 0700 /home/coder/.claude
-    if [[ ! -e /home/coder/.claude/settings.json ]]; then
-        cat > /home/coder/.claude/settings.json <<'JSON'
-{
-  "hasCompletedOnboarding": true
-}
-JSON
-        chown coder:coder /home/coder/.claude/settings.json
-        chmod 0600 /home/coder/.claude/settings.json
+    if [[ ! -e /home/coder/.claude.json ]]; then
+        echo '{}' > /home/coder/.claude.json
     fi
+    if ! grep -q '"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true' /home/coder/.claude.json; then
+        tmp=$(mktemp)
+        jq '. + {hasCompletedOnboarding: true, lastOnboardingVersion: "2.1.146"}' \
+            /home/coder/.claude.json > "$tmp" && mv "$tmp" /home/coder/.claude.json
+    fi
+    chown coder:coder /home/coder/.claude.json
+    chmod 0600 /home/coder/.claude.json
 
     log "dropping privileges → coder"
     # IMPORTANT: PAM's `pam_env` session module on Debian can RE-APPLY

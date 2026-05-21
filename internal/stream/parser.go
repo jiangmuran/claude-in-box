@@ -32,9 +32,7 @@ func NewParser(bus *Bus) *Parser {
 // Returns the first non-EOF read error, if any. The reader is not closed.
 func (p *Parser) Run(ctx context.Context, r io.Reader) error {
 	scanner := bufio.NewScanner(r)
-	// Default token cap is 64 KiB; bump for long tool outputs.
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-
 	for scanner.Scan() {
 		if ctx != nil {
 			select {
@@ -49,17 +47,13 @@ func (p *Parser) Run(ctx context.Context, r io.Reader) error {
 			continue
 		}
 		if line[0] != '{' && line[0] != '[' {
-			// Anything not JSON-ish is treated as raw PTY output.
 			p.emitPTYRaw(line)
 			continue
 		}
 		if err := p.handle(line); err != nil {
-			// Per-line failure should not kill the parser; emit a raw frame
-			// containing the offending line and continue.
 			p.emitRawString(line)
 		}
 	}
-
 	if err := scanner.Err(); err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil
@@ -67,6 +61,34 @@ func (p *Parser) Run(ctx context.Context, r io.Reader) error {
 		return fmt.Errorf("parser scan: %w", err)
 	}
 	return nil
+}
+
+// RunRaw streams raw byte chunks from `r` as `pty.raw` frames — used by
+// interactive REPL sessions whose output is ANSI/TUI, not JSONL. Returns
+// the first non-EOF read error.
+func (p *Parser) RunRaw(ctx context.Context, r io.Reader) error {
+	buf := make([]byte, 4096)
+	for {
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+		}
+		n, err := r.Read(buf)
+		if n > 0 {
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+			p.emitPTYRaw(chunk)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("parser read: %w", err)
+		}
+	}
 }
 
 func trimTrailingNUL(b []byte) []byte {

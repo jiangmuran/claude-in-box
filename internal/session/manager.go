@@ -259,10 +259,12 @@ func (m *Manager) commandFor(opts SpawnOptions) (string, []string, error) {
 		return "", nil, fmt.Errorf("commandFor: claude binary %q not on PATH: %w", bin, err)
 	}
 
-	args := []string{
-		"--output-format", "stream-json",
-		"--include-hook-events",
-	}
+	// IMPORTANT: --output-format / --include-hook-events / --include-partial-messages
+	// are all `--print`-only per Claude Code's official help. Passing them to
+	// interactive REPL mode makes claude refuse to start. We rely on hooks
+	// (installed via --settings) for the structured event channel and the
+	// raw PTY byte stream for the visible terminal view.
+	var args []string
 	if opts.BypassPermissions {
 		args = append(args, "--dangerously-skip-permissions")
 	}

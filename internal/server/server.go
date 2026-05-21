@@ -15,6 +15,8 @@ import (
 	"github.com/jiangmuran/claude-in-box/internal/clauth"
 	"github.com/jiangmuran/claude-in-box/internal/fsapi"
 	"github.com/jiangmuran/claude-in-box/internal/hooks"
+	"github.com/jiangmuran/claude-in-box/internal/prefs"
+	"github.com/jiangmuran/claude-in-box/internal/providers"
 	"github.com/jiangmuran/claude-in-box/internal/session"
 	"github.com/jiangmuran/claude-in-box/internal/shell"
 )
@@ -27,9 +29,11 @@ type Config struct {
 
 	Sessions   *session.Manager
 	Tokens     auth.Store
-	ClaudeAuth *clauth.Manager // may be nil — handlers return 503 in that case
-	Shells     *shell.Manager  // may be nil — handlers return 503
-	Files      *fsapi.Manager  // may be nil — handlers return 503
+	ClaudeAuth *clauth.Manager  // may be nil — handlers return 503 in that case
+	Shells     *shell.Manager   // may be nil — handlers return 503
+	Files      *fsapi.Manager   // may be nil — handlers return 503
+	Providers  *providers.Store // may be nil — handlers return 503
+	Prefs      *prefs.Store     // may be nil — handlers return 503
 	AESReplay  *aespkg.ReplayCache
 
 	// Version, Commit are reported by /api/health and the placeholder index.
@@ -41,6 +45,11 @@ type Config struct {
 type Server struct {
 	cfg Config
 	mux *http.ServeMux
+
+	// providerHost is a per-request scratch carrying the upstream
+	// ANTHROPIC_BASE_URL when a session create routes through a stored
+	// provider. Cleared in createSession after being consumed.
+	providerHost string
 }
 
 // New builds a Server with all routes registered.
@@ -136,6 +145,26 @@ func (s *Server) routes() {
 		auth.Require(s.cfg.Tokens, auth.ScopeFSWrite)(http.HandlerFunc(s.fsMkdir)))
 	mux.Handle("DELETE /api/fs/delete",
 		auth.Require(s.cfg.Tokens, auth.ScopeFSWrite)(http.HandlerFunc(s.fsDelete)))
+
+	// Providers (third-party Anthropic-compatible endpoints).
+	mux.Handle("GET /api/providers",
+		auth.Require(s.cfg.Tokens, auth.ScopeProvidersRead)(http.HandlerFunc(s.listProviders)))
+	mux.Handle("POST /api/providers",
+		auth.Require(s.cfg.Tokens, auth.ScopeProvidersWrite)(http.HandlerFunc(s.addProvider)))
+	mux.Handle("PUT /api/providers/{id}",
+		auth.Require(s.cfg.Tokens, auth.ScopeProvidersWrite)(http.HandlerFunc(s.replaceProvider)))
+	mux.Handle("DELETE /api/providers/{id}",
+		auth.Require(s.cfg.Tokens, auth.ScopeProvidersWrite)(http.HandlerFunc(s.deleteProvider)))
+	mux.Handle("POST /api/providers/probe",
+		auth.Require(s.cfg.Tokens, auth.ScopeProvidersWrite)(http.HandlerFunc(s.probeProvider)))
+	mux.Handle("POST /api/providers/{id}/probe",
+		auth.Require(s.cfg.Tokens, auth.ScopeProvidersWrite)(http.HandlerFunc(s.probeProvider)))
+
+	// Preferences (default auth mode, default provider, default model).
+	mux.Handle("GET /api/prefs",
+		auth.Require(s.cfg.Tokens, auth.ScopePrefsRead)(http.HandlerFunc(s.getPrefs)))
+	mux.Handle("PATCH /api/prefs",
+		auth.Require(s.cfg.Tokens, auth.ScopePrefsWrite)(http.HandlerFunc(s.patchPrefs)))
 
 	// Claude auth (in-container `claude auth login --claudeai`).
 	mux.Handle("GET /api/auth/claude/status",

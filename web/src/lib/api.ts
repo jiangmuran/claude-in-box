@@ -3,6 +3,7 @@ import { get } from 'svelte/store'
 import type {
   Session, TokenPublic, Frame, ClaudeAuthStatus, ClaudeFlowSnapshot,
   ShellView, FSListResponse, FSReadResponse,
+  Provider, ProviderProbe, Prefs,
 } from './types'
 
 function authHeader(): HeadersInit {
@@ -63,6 +64,7 @@ export const api = {
     auth_mode?: 'subscription' | 'api_key'
     api_key?: string
     oauth_token?: string
+    provider_id?: string
     resume_from?: string
     bypass_permissions?: boolean
   }) => req<Session>('POST', '/api/sessions', opts),
@@ -109,6 +111,20 @@ export const api = {
     req<void>('POST', '/api/fs/mkdir', { root, path }),
   fsDelete: (root: string, path: string) =>
     req<void>('DELETE', `/api/fs/delete?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`),
+
+  // providers (third-party Anthropic-compatible endpoints)
+  listProviders:   () => req<{ providers: Provider[] }>('GET', '/api/providers'),
+  addProvider:     (p: { label: string; api_host: string; api_key: string; model?: string }) =>
+    req<Provider>('POST', '/api/providers', p),
+  replaceProvider: (id: string, p: { label: string; api_host: string; api_key: string; model?: string }) =>
+    req<Provider>('PUT', `/api/providers/${id}`, p),
+  deleteProvider:  (id: string) => req<void>('DELETE', `/api/providers/${id}`),
+  probeProvider:   (body: { id?: string; label?: string; api_host?: string; api_key?: string; model?: string }) =>
+    req<ProviderProbe>('POST', '/api/providers/probe', body),
+
+  // preferences
+  getPrefs:   () => req<Prefs>('GET', '/api/prefs'),
+  patchPrefs: (p: Prefs) => req<Prefs>('PATCH', '/api/prefs', p),
 
   // claude auth (in-container `claude auth login`)
   claudeStatus: () => req<ClaudeAuthStatus>('GET', '/api/auth/claude/status'),

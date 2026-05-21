@@ -117,3 +117,29 @@ export interface FSReadResponse {
   truncated: boolean
   size: number
 }
+
+export interface Provider {
+  id: string
+  label: string
+  api_host: string
+  model?: string
+  api_key?: string
+  created_at: string
+  updated_at?: string
+  last_used_at?: string
+}
+
+export interface ProviderProbe {
+  ok: boolean
+  http: number
+  endpoint: string
+  latency_ms: number
+  detail?: string
+}
+
+export interface Prefs {
+  default_auth_mode?: 'subscription' | 'api_key' | ''
+  default_provider_id?: string
+  default_model?: string
+  updated_at?: string
+}

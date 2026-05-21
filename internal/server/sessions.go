@@ -21,6 +21,7 @@ type createSessionRequest struct {
 	AuthMode          string `json:"auth_mode,omitempty"`
 	APIKey            string `json:"api_key,omitempty"`
 	OAuthToken        string `json:"oauth_token,omitempty"`
+	ProviderID        string `json:"provider_id,omitempty"`
 	ResumeFrom        string `json:"resume_from,omitempty"`
 	BypassPermissions *bool  `json:"bypass_permissions,omitempty"`
 }
@@ -92,19 +93,48 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "api_key":
+		// Three sources for credentials, in order:
+		// 1. Explicit { api_key } in the request body.
+		// 2. provider_id pointing at a stored third-party endpoint.
+		// 3. ANTHROPIC_API_KEY env var on the container.
+		var providerHost, providerModel string
+		if req.ProviderID != "" && s.cfg.Providers != nil {
+			p, ok := s.cfg.Providers.Get(req.ProviderID)
+			if !ok {
+				writeErr(w, http.StatusBadRequest, "provider_id not found")
+				return
+			}
+			if apiKey == "" {
+				apiKey = p.APIKey
+			}
+			providerHost = p.APIHost
+			if req.Model == "" && p.Model != "" {
+				providerModel = p.Model
+			}
+			s.cfg.Providers.MarkUsed(p.ID)
+		}
 		if apiKey == "" {
 			apiKey = os.Getenv("ANTHROPIC_API_KEY")
 		}
 		if apiKey == "" {
-			writeErr(w, http.StatusBadRequest, "api_key mode requires api_key or ANTHROPIC_API_KEY env")
+			writeErr(w, http.StatusBadRequest, "api_key mode requires api_key, provider_id, or ANTHROPIC_API_KEY env")
 			return
+		}
+		// Stash the provider's host+model on the createSessionRequest so
+		// the Spawn call below picks them up via opts.APIHost / opts.Model.
+		req.APIKey = apiKey
+		if providerHost != "" {
+			s.providerHost = providerHost
+		}
+		if providerModel != "" && req.Model == "" {
+			req.Model = providerModel
 		}
 	default:
 		writeErr(w, http.StatusBadRequest, "auth_mode must be \"subscription\" or \"api_key\"")
 		return
 	}
 
-	sess, err := s.cfg.Sessions.Spawn(r.Context(), session.SpawnOptions{
+	spawnOpts := session.SpawnOptions{
 		Workdir:           req.Workdir,
 		Model:             req.Model,
 		AuthMode:          authMode,
@@ -112,7 +142,13 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		OAuthToken:        oauth,
 		ResumeFrom:        req.ResumeFrom,
 		BypassPermissions: bypass,
-	})
+	}
+	if s.providerHost != "" {
+		spawnOpts.ExtraEnv = append(spawnOpts.ExtraEnv,
+			"ANTHROPIC_BASE_URL="+s.providerHost)
+		s.providerHost = "" // one-shot
+	}
+	sess, err := s.cfg.Sessions.Spawn(r.Context(), spawnOpts)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "spawn: "+err.Error())
 		return

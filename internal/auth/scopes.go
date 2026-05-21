@@ -15,6 +15,10 @@ const (
 	ScopeShellsInput   = "shells:input"
 	ScopeFSRead        = "fs:read"
 	ScopeFSWrite       = "fs:write"
+	ScopeProvidersRead  = "providers:read"
+	ScopeProvidersWrite = "providers:write"
+	ScopePrefsRead      = "prefs:read"
+	ScopePrefsWrite     = "prefs:write"
 	ScopeHooksRead     = "hooks:read"
 	ScopeHooksWrite    = "hooks:write"
 	ScopeTokensRead    = "tokens:read"
@@ -33,6 +37,10 @@ var AllScopes = []string{
 	ScopeShellsInput,
 	ScopeFSRead,
 	ScopeFSWrite,
+	ScopeProvidersRead,
+	ScopeProvidersWrite,
+	ScopePrefsRead,
+	ScopePrefsWrite,
 	ScopeHooksRead,
 	ScopeHooksWrite,
 	ScopeTokensRead,

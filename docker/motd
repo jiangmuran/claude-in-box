@@ -1,0 +1,17 @@
+
+
+  claude-in-box
+  ─────────────────────────────────────────────────────────────
+
+  A portable Claude Code dev environment.
+
+  runtime    Node 20 · Python 3 + FastAPI · Go 1.25 · Rust
+  services   nginx · redis · postgres · docker CLI
+  tools      ripgrep · fd · bat · htop · tmux · vim · nano
+  claude     `claude --version` to check; `claude` to start interactive
+
+  Net egress is routed through transparent SOCKS5 when CIB_PROXY_URL is set.
+  Workspace is mounted at /workspace ; box state at /var/lib/claude-in-box.
+
+  Press <tab> twice on `claude<tab><tab>` to see every flag.
+

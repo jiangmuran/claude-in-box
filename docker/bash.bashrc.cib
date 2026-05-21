@@ -1,0 +1,56 @@
+# claude-in-box: friendlier defaults for interactive bash inside the
+# container.  Sourced from /etc/profile.d/cib.sh (login shells) and
+# appended onto /etc/bash.bashrc (non-login interactive shells).
+# Idempotent — safe to source twice.
+
+# Only do anything in an interactive shell.
+case $- in *i*) ;; *) return ;; esac
+
+# Colour-aware ls / grep / diff.
+if command -v dircolors >/dev/null 2>&1; then
+    eval "$(dircolors -b 2>/dev/null)"
+fi
+alias ls='ls --color=auto'
+alias ll='ls -alF --color=auto'
+alias la='ls -A --color=auto'
+alias l='ls -CF --color=auto'
+alias grep='grep --color=auto'
+alias egrep='egrep --color=auto'
+alias fgrep='fgrep --color=auto'
+alias diff='diff --color=auto'
+
+# Less with colours preserved.
+export LESS='-R'
+export PAGER='less -R'
+
+# Bigger history; share across panes; never persist duplicates.
+export HISTSIZE=10000
+export HISTFILESIZE=50000
+export HISTCONTROL=ignoredups:erasedups
+export HISTTIMEFORMAT='%F %T '
+shopt -s histappend 2>/dev/null
+
+# Prompt with cwd + git branch (when in a git repo).
+__cib_git_branch() {
+    git branch 2>/dev/null | awk '/^\* / { printf " (%s)", $2 }'
+}
+PS1='\[\e[38;5;180m\]\u@\h\[\e[0m\]:\[\e[38;5;67m\]\w\[\e[38;5;180m\]$(__cib_git_branch)\[\e[0m\]\$ '
+
+# `claude` shorthand: nicer aliases.
+alias c='claude'
+
+# bat → cat fallback (Debian ships bat as batcat).
+if ! command -v bat >/dev/null 2>&1 && command -v batcat >/dev/null 2>&1; then
+    alias bat='batcat --paging=never'
+fi
+
+# fd shipped as fdfind on Debian.
+if ! command -v fd >/dev/null 2>&1 && command -v fdfind >/dev/null 2>&1; then
+    alias fd='fdfind'
+fi
+
+# Print the motd once per interactive shell unless suppressed.
+if [[ -z "${CIB_MOTD_SHOWN:-}" ]] && [[ -r /etc/motd ]] && [[ -t 1 ]]; then
+    cat /etc/motd
+    export CIB_MOTD_SHOWN=1
+fi

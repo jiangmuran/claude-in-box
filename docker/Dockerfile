@@ -142,7 +142,12 @@ COPY docker/entrypoint.sh    /usr/local/bin/entrypoint
 COPY docker/cib-services.sh  /usr/local/bin/cib-services
 COPY docker/redsocks.conf.template /etc/claude-in-box/redsocks.conf.template
 COPY docker/nginx.default.conf     /etc/claude-in-box/nginx.default.conf
-RUN chmod +x /usr/local/bin/entrypoint /usr/local/bin/cib /usr/local/bin/cib-services
+COPY docker/motd                   /etc/motd
+COPY docker/bash.bashrc.cib        /etc/profile.d/cib.sh
+RUN chmod +x /usr/local/bin/entrypoint /usr/local/bin/cib /usr/local/bin/cib-services \
+ && chmod 0644 /etc/profile.d/cib.sh /etc/motd \
+ && printf '\n# claude-in-box additions\n[ -r /etc/profile.d/cib.sh ] && . /etc/profile.d/cib.sh\n' >> /etc/bash.bashrc \
+ && ln -sf /etc/profile.d/cib.sh /root/.bashrc
 
 # Sensible Claude Code env defaults; user can override.
 ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \

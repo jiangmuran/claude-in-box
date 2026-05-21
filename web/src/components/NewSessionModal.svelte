@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
   import { T } from '../lib/i18n'
-  import type { Session } from '../lib/types'
+  import type { Session, Provider } from '../lib/types'
+  import ProvidersModal from './ProvidersModal.svelte'
 
   interface Props {
     onclose: () => void
@@ -12,8 +14,33 @@
   let workdir = $state('/workspace')
   let model = $state('')
   let authMode = $state<'subscription' | 'api_key'>('subscription')
+  let providerId = $state('')
+  let providers = $state<Provider[]>([])
+  let providersOpen = $state(false)
   let busy = $state(false)
   let error = $state('')
+
+  onMount(async () => {
+    // Apply saved defaults so the box does not ask the same question twice.
+    try {
+      const p = await api.getPrefs()
+      if (p.default_auth_mode === 'subscription' || p.default_auth_mode === 'api_key') {
+        authMode = p.default_auth_mode
+      }
+      if (p.default_provider_id) providerId = p.default_provider_id
+      if (p.default_model) model = p.default_model
+    } catch { /* prefs are optional */ }
+    await refreshProviders()
+  })
+
+  async function refreshProviders() {
+    try {
+      const r = await api.listProviders()
+      providers = r.providers
+      // If the saved default no longer exists, clear it.
+      if (providerId && !providers.find((p) => p.id === providerId)) providerId = ''
+    } catch { /* ignore */ }
+  }
 
   async function create(e: SubmitEvent) {
     e.preventDefault()
@@ -24,8 +51,17 @@
         workdir,
         model: model || undefined,
         auth_mode: authMode,
+        provider_id: authMode === 'api_key' && providerId ? providerId : undefined,
         bypass_permissions: true,
       })
+      // Remember the user's choices so the next launch is one-click.
+      try {
+        await api.patchPrefs({
+          default_auth_mode: authMode,
+          default_provider_id: authMode === 'api_key' ? (providerId || '-') : '-',
+          default_model: model || '-',
+        })
+      } catch { /* best-effort */ }
       oncreated(s)
     } catch (err) {
       if (err instanceof ApiError) error = err.message
@@ -87,12 +123,26 @@
           {$T('api key', 'api key')}
         </button>
       </div>
-      <p class="hint mono">
-        {$T(
-          '— uses the container env (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY) —',
-          '— 使用容器内的 env(CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY)—'
-        )}
-      </p>
+      {#if authMode === 'subscription'}
+        <p class="hint mono">
+          {$T(
+            '— uses the in-container claude login (top-right chip) or CLAUDE_CODE_OAUTH_TOKEN env —',
+            '— 用容器内 claude login(右上角 chip)或 CLAUDE_CODE_OAUTH_TOKEN env —'
+          )}
+        </p>
+      {:else}
+        <div class="provider-row">
+          <select bind:value={providerId} disabled={busy}>
+            <option value="">{$T('— ANTHROPIC_API_KEY env —', '— 用 ANTHROPIC_API_KEY env —')}</option>
+            {#each providers as p (p.id)}
+              <option value={p.id}>{p.label} · {p.api_host}{p.model ? ' · ' + p.model : ''}</option>
+            {/each}
+          </select>
+          <button type="button" class="ghost" onclick={() => (providersOpen = true)}>
+            {$T('manage', '管理')}
+          </button>
+        </div>
+      {/if}
     </div>
 
     <div class="actions">
@@ -103,6 +153,10 @@
     </div>
   </form>
 </div>
+
+{#if providersOpen}
+  <ProvidersModal onclose={() => { providersOpen = false; refreshProviders() }} />
+{/if}
 
 <style>
   .backdrop {
@@ -197,6 +251,34 @@
   .seg-btn:last-child { border-right: none; }
   .seg-btn.active { background: var(--ink); color: var(--cream); }
   .seg-btn:hover:not(.active) { background: var(--cream-2); }
+
+  .provider-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0.5rem;
+    margin-top: 0.25rem;
+  }
+  .provider-row select {
+    border: 1px solid var(--line-strong);
+    background: var(--cream);
+    padding: 0.4rem 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--ink);
+    border-radius: var(--r-xs);
+    min-width: 0;
+  }
+  .provider-row .ghost {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-3);
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-xs);
+    background: transparent;
+    cursor: pointer;
+  }
+  .provider-row .ghost:hover { color: var(--coral-dark); border-color: var(--coral); }
 
   .hint {
     font-size: 11px;

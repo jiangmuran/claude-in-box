@@ -35,7 +35,7 @@ docker run -d \
     --env-file "$DATA/secrets/cib.env" \
     -v "$DATA/workspace:/workspace" \
     -v "$DATA/sessions:/var/lib/claude-in-box/sessions" \
-    -v "$DATA/claude-home:/home/coder/.claude" \
+    -v "$DATA/claude-home:/root/.claude" \
     "$IMAGE"
 
 log "container started, waiting for health"

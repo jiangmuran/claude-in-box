@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jiangmuran/claude-in-box/internal/auth"
+	"github.com/jiangmuran/claude-in-box/internal/clauth"
 	"github.com/jiangmuran/claude-in-box/internal/server"
 	"github.com/jiangmuran/claude-in-box/internal/session"
 )
@@ -88,12 +89,15 @@ func run(addr, dataDir, claudeBin string) error {
 	}
 	sessionMgr.ControlAddr = loopbackAddr(addr)
 
+	claudeAuth := clauth.NewManager(claudeBin)
+
 	srv := server.New(server.Config{
-		Mode:     mode,
-		Sessions: sessionMgr,
-		Tokens:   tokenStore,
-		Version:  version,
-		Commit:   commit,
+		Mode:       mode,
+		Sessions:   sessionMgr,
+		Tokens:     tokenStore,
+		ClaudeAuth: claudeAuth,
+		Version:    version,
+		Commit:     commit,
 	})
 
 	slog.Info("starting",

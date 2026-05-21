@@ -58,3 +58,30 @@ export interface TokenPublic {
   created_at: string
   expires_at?: string
 }
+
+export interface ClaudeAuthStatus {
+  loggedIn: boolean
+  authMethod?: string
+  apiProvider?: string
+  email?: string
+  orgId?: string
+  orgName?: string
+  subscriptionType?: string
+}
+
+export type ClaudeFlowState =
+  | 'starting'
+  | 'awaiting_code'
+  | 'verifying'
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+  | 'timed_out'
+
+export interface ClaudeFlowSnapshot {
+  id: string
+  state: ClaudeFlowState
+  auth_url?: string
+  started_at: string
+  error?: string
+}

@@ -1,6 +1,6 @@
 import { authToken } from './stores'
 import { get } from 'svelte/store'
-import type { Session, TokenPublic, Frame } from './types'
+import type { Session, TokenPublic, Frame, ClaudeAuthStatus, ClaudeFlowSnapshot } from './types'
 
 function authHeader(): HeadersInit {
   const t = get(authToken)
@@ -84,4 +84,14 @@ export const api = {
       label, scopes, ttl_hours: ttlHours,
     }),
   revokeToken:  (id: string) => req<void>('DELETE', `/api/tokens/${id}`),
+
+  // claude auth (in-container `claude auth login`)
+  claudeStatus: () => req<ClaudeAuthStatus>('GET', '/api/auth/claude/status'),
+  claudeStart:  (opts: { sso?: boolean; console?: boolean; email?: string } = {}) =>
+    req<ClaudeFlowSnapshot>('POST', '/api/auth/claude/start', opts),
+  claudeCode:   (flowId: string, code: string) =>
+    req<ClaudeFlowSnapshot>('POST', '/api/auth/claude/code', { flow_id: flowId, code }),
+  claudeCancel: (flowId: string) =>
+    req<void>('POST', '/api/auth/claude/cancel', { flow_id: flowId }),
+  claudeLogout: () => req<void>('POST', '/api/auth/claude/logout'),
 }

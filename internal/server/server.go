@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/jiangmuran/claude-in-box/internal/auth"
+	"github.com/jiangmuran/claude-in-box/internal/clauth"
 	"github.com/jiangmuran/claude-in-box/internal/hooks"
 	"github.com/jiangmuran/claude-in-box/internal/session"
 )
@@ -21,8 +22,9 @@ type Config struct {
 	// /sse, /aes, /internal).
 	Mode string
 
-	Sessions *session.Manager
-	Tokens   auth.Store
+	Sessions   *session.Manager
+	Tokens     auth.Store
+	ClaudeAuth *clauth.Manager // may be nil — handlers return 503 in that case
 
 	// Version, Commit are reported by /api/health and the placeholder index.
 	Version string
@@ -86,6 +88,18 @@ func (s *Server) routes() {
 		auth.Require(s.cfg.Tokens, auth.ScopeTokensWrite)(http.HandlerFunc(s.mintToken)))
 	mux.Handle("DELETE /api/tokens/{id}",
 		auth.Require(s.cfg.Tokens, auth.ScopeTokensWrite)(http.HandlerFunc(s.revokeToken)))
+
+	// Claude auth (in-container `claude auth login --claudeai`).
+	mux.Handle("GET /api/auth/claude/status",
+		auth.Require(s.cfg.Tokens, auth.ScopeSessionsRead)(http.HandlerFunc(s.claudeAuthStatus)))
+	mux.Handle("POST /api/auth/claude/start",
+		auth.Require(s.cfg.Tokens, auth.ScopeSessionsWrite)(http.HandlerFunc(s.claudeAuthStart)))
+	mux.Handle("POST /api/auth/claude/code",
+		auth.Require(s.cfg.Tokens, auth.ScopeSessionsWrite)(http.HandlerFunc(s.claudeAuthCode)))
+	mux.Handle("POST /api/auth/claude/cancel",
+		auth.Require(s.cfg.Tokens, auth.ScopeSessionsWrite)(http.HandlerFunc(s.claudeAuthCancel)))
+	mux.Handle("POST /api/auth/claude/logout",
+		auth.Require(s.cfg.Tokens, auth.ScopeSessionsWrite)(http.HandlerFunc(s.claudeAuthLogout)))
 
 	// Internal hooks receiver. Authenticated by per-session HMAC, not by
 	// the bearer middleware; see internal/hooks/receiver.go.

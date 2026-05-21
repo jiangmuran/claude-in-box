@@ -129,10 +129,20 @@ func (m *Manager) Spawn(ctx context.Context, opts SpawnOptions) (*Session, error
 		args = append(args, "--settings", settingsFile)
 	}
 
-	cmd := exec.CommandContext(ctx, bin, args...)
+	// IMPORTANT: do NOT use exec.CommandContext with the *request* context
+	// here. The HTTP handler that called Spawn returns within milliseconds
+	// of pty.Start succeeding (after writing the 201 response). As soon as
+	// the response body is flushed, net/http cancels the request context
+	// (or the client disconnects), which exec.CommandContext interprets as
+	// "kill the child". Claude is then SIGKILL'd within ~1ms — exactly the
+	// "exit -1, no PTY output" symptom the user saw. The session lives for
+	// as long as Kill() / Interrupt() / Wait() decide, NOT as long as the
+	// HTTP request that created it.
+	cmd := exec.Command(bin, args...)
 	cmd.Dir = opts.Workdir
 	cmd.Env = m.envFor(opts)
 	sess.cmd = cmd
+	_ = ctx // currently unused; kept in the signature for future cancel-on-shutdown wiring
 
 	master, err := pty.Start(cmd)
 	if err != nil {

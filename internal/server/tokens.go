@@ -41,11 +41,16 @@ func (s *Server) mintToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Plaintext is returned ONCE here, never again.
-	writeJSON(w, http.StatusCreated, map[string]any{
+	// Plaintext (bearer) and aes_secret_hex (AES master, optional) are
+	// returned ONCE here, never again.
+	out := map[string]any{
 		"token":     res.Token.Public(),
 		"plaintext": res.Plaintext,
-	})
+	}
+	if res.AESSecretHex != "" {
+		out["aes_secret_hex"] = res.AESSecretHex
+	}
+	writeJSON(w, http.StatusCreated, out)
 }
 
 func (s *Server) revokeToken(w http.ResponseWriter, r *http.Request) {

@@ -141,6 +141,21 @@ if [[ "$(id -u)" -eq 0 ]] && [[ "${CIB_RUN_AS_ROOT:-0}" != "1" ]]; then
             chown -R coder:coder "$d" 2>/dev/null || true
         fi
     done
+    # Seed the user-level Claude Code settings so the welcome flow / theme
+    # picker / "skip permissions" confirmation do not greet the user every
+    # time they open a fresh shell and type `claude` directly. Idempotent:
+    # only write if the file is missing.
+    install -d -o coder -g coder -m 0700 /home/coder/.claude
+    if [[ ! -e /home/coder/.claude/settings.json ]]; then
+        cat > /home/coder/.claude/settings.json <<'JSON'
+{
+  "hasCompletedOnboarding": true
+}
+JSON
+        chown coder:coder /home/coder/.claude/settings.json
+        chmod 0600 /home/coder/.claude/settings.json
+    fi
+
     log "dropping privileges → coder"
     # IMPORTANT: PAM's `pam_env` session module on Debian can RE-APPLY
     # proxy env from /etc/environment and /etc/security/pam_env.conf on

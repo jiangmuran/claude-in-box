@@ -35,10 +35,14 @@ var DefaultEvents = []string{
 }
 
 // Settings is the minimal shape of a Claude Code settings.json we author.
-// It deliberately only contains the `hooks` section so user / project / image
-// settings can still merge in.
+// It contains:
+//   - the `hooks` section — our HTTP-callback hooks for the session
+//   - `hasCompletedOnboarding: true` — bypass the first-run theme picker
+//     and the "dangerously skip permissions" confirmation that would
+//     otherwise block every fresh session at the welcome screen.
 type Settings struct {
-	Hooks map[string][]HookEntry `json:"hooks"`
+	Hooks                  map[string][]HookEntry `json:"hooks,omitempty"`
+	HasCompletedOnboarding bool                   `json:"hasCompletedOnboarding"`
 }
 
 // HookEntry is one hook registration under a single event.
@@ -72,7 +76,10 @@ func WriteSessionSettings(configDir, sessionID, token, ctlAddr string, events []
 		return "", fmt.Errorf("hooks: mkdir configDir: %w", err)
 	}
 
-	settings := Settings{Hooks: make(map[string][]HookEntry, len(events))}
+	settings := Settings{
+		Hooks:                  make(map[string][]HookEntry, len(events)),
+		HasCompletedOnboarding: true,
+	}
 	for _, event := range events {
 		// Single-quoted shell args: the token is hex, sessionID is uuid, and
 		// event is from our whitelist, so none of them contain shell

@@ -207,7 +207,14 @@ func (s *Server) streamShellWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
+	// Browsers fail the handshake if the client offered any subprotocol the
+	// server does not echo back (RFC 6455 §4.1). Our Web UI sends
+	// `bearer.<token>, binary`; auth.Require consumed the bearer entry, so
+	// echo back "binary" here.
+	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		OriginPatterns: []string{"*"},
+		Subprotocols:   []string{"binary"},
+	})
 	if err != nil {
 		return
 	}

@@ -111,6 +111,16 @@ NFT
 
 log "claude-in-box starting (mode=${CIB_MODE:-default})"
 
+# When the host's docker CLI has a `proxies` block in ~/.docker/config.json,
+# `docker run` auto-injects HTTP_PROXY / HTTPS_PROXY / etc into the container
+# env. Node fetch (used by `claude`) cannot parse `socks5://` URLs in those
+# vars and crashes with `UnsupportedProxyProtocol`. We route via transparent
+# SOCKS5 at the network layer (redsocks + nftables) — apps must NOT see the
+# proxy at the env layer. Strip the auto-injected ones early so every child
+# we spawn from here is clean.
+unset HTTP_PROXY  HTTPS_PROXY  FTP_PROXY  ALL_PROXY  NO_PROXY
+unset http_proxy  https_proxy  ftp_proxy  all_proxy  no_proxy
+
 if [[ -n "${CIB_PROXY_URL:-}" ]]; then
     setup_socks "$CIB_PROXY_URL"
 fi

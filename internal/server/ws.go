@@ -22,9 +22,12 @@ func (s *Server) streamWS(w http.ResponseWriter, r *http.Request) {
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		// We let the client suggest a content-type subprotocol like "json"
 		// or "msgpack" alongside bearer.<token>; the bearer entry was
-		// already consumed by auth.Require. Accept the first non-bearer one
-		// if offered; otherwise leave empty (default text frames).
+		// already consumed by auth.Require. The server MUST echo at least
+		// one of the client's offered subprotocols (RFC 6455 §4.1) or
+		// browsers fail the handshake — list every non-secret label the UI
+		// might offer.
 		OriginPatterns: []string{"*"},
+		Subprotocols:   []string{"json"},
 	})
 	if err != nil {
 		return

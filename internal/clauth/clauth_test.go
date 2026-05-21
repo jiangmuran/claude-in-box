@@ -2,6 +2,7 @@ package clauth
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -70,19 +71,50 @@ func TestStatus_LoggedOutThenIn(t *testing.T) {
 	}
 }
 
-func TestStart_BadCodeFails(t *testing.T) {
+func TestStart_FatalCodeFails(t *testing.T) {
 	m, _ := stub(t)
 	ctx := context.Background()
 	f, err := m.Start(ctx, StartOptions{URLTimeout: 3 * time.Second, IdleTimeout: 3 * time.Second})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	err = f.SubmitCode(ctx, "wrong")
+	err = f.SubmitCode(ctx, "fatal-deadbeef")
 	if err == nil {
-		t.Fatal("expected SubmitCode failure for bad code")
+		t.Fatal("expected SubmitCode failure for fatal-* code")
 	}
 	if f.Snapshot().State != StateFailed {
 		t.Fatalf("state = %q, want failed", f.Snapshot().State)
+	}
+}
+
+// Real claude prints "Invalid code." on a bad paste but STAYS ALIVE and
+// re-prompts for another paste. The stub mirrors that on `retry-*`.
+// SubmitCode must surface ErrInvalidCode, reset the flow to awaiting_code,
+// and allow a follow-up SubmitCode within the same flow.
+func TestStart_InvalidCodeRecovers(t *testing.T) {
+	m, _ := stub(t)
+	ctx := context.Background()
+	f, err := m.Start(ctx, StartOptions{URLTimeout: 3 * time.Second, IdleTimeout: 3 * time.Second})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if err := f.SubmitCode(ctx, "retry-nope"); err == nil {
+		t.Fatal("expected ErrInvalidCode")
+	} else if !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("err = %v, want ErrInvalidCode", err)
+	}
+	if got := f.Snapshot().State; got != StateAwaitingCode {
+		t.Fatalf("state after invalid = %q, want awaiting_code", got)
+	}
+
+	// The flow is still alive — submitting a good code in the same flow
+	// must complete it.
+	if err := f.SubmitCode(ctx, "good-finalcode"); err != nil {
+		t.Fatalf("second SubmitCode: %v", err)
+	}
+	if got := f.Snapshot().State; got != StateDone {
+		t.Fatalf("state after good = %q, want done", got)
 	}
 }
 

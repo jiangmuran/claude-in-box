@@ -21,20 +21,32 @@ EOF
     "auth login")
         echo "Opening browser to sign in…"
         echo "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?fake=1&code_challenge=stub&state=stubstate"
-        printf "Paste code here if prompted > "
-        IFS= read -r code
-        case "$code" in
-            good-*)
-                touch "$STATE_DIR/loggedin"
-                echo "test@example.com" > "$STATE_DIR/email"
-                echo "Signed in."
-                exit 0
-                ;;
-            *)
-                echo "Error: invalid code" >&2
-                exit 1
-                ;;
-        esac
+        while true; do
+            printf "Paste code here if prompted > "
+            IFS= read -r code
+            case "$code" in
+                good-*)
+                    touch "$STATE_DIR/loggedin"
+                    echo "test@example.com" > "$STATE_DIR/email"
+                    echo "Signed in."
+                    exit 0
+                    ;;
+                retry-*)
+                    # Stay alive after rejecting so the caller can paste
+                    # again — same path the real claude CLI takes.
+                    echo "Invalid code. Please make sure the full code was copied."
+                    continue
+                    ;;
+                fatal-*)
+                    echo "Error: bad code" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "Invalid code. Please make sure the full code was copied."
+                    continue
+                    ;;
+            esac
+        done
         ;;
 
     "auth logout")

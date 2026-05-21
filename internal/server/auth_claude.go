@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -80,13 +81,19 @@ func (s *Server) claudeAuthCode(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "no such flow")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	// Outer timeout is comfortably larger than SubmitCode's internal 30s
+	// rejection deadline, so the inner ErrInvalidCode path always wins.
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	if err := flow.SubmitCode(ctx, req.Code); err != nil {
-		// Return the latest snapshot so the UI can surface the failure state.
+		// Invalid-code is a recoverable user error: state has been reset
+		// to awaiting_code and the UI may post another code on the same
+		// flow_id. Surface as 400 with retryable=true.
+		retryable := errors.Is(err, clauth.ErrInvalidCode)
 		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error":    err.Error(),
-			"snapshot": flow.Snapshot(),
+			"error":     err.Error(),
+			"retryable": retryable,
+			"snapshot":  flow.Snapshot(),
 		})
 		return
 	}

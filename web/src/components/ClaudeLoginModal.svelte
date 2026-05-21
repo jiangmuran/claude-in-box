@@ -61,9 +61,15 @@
       }
     } catch (e) {
       if (e instanceof ApiError) {
-        const snap = (e.data as { snapshot?: ClaudeFlowSnapshot } | undefined)?.snapshot
-        if (snap) flow = snap
+        const data = (e.data ?? {}) as { snapshot?: ClaudeFlowSnapshot; retryable?: boolean }
+        if (data.snapshot) flow = data.snapshot
         error = e.message
+        // Server marks recoverable errors (claude rejected the pasted
+        // code but is still re-prompting). Clear the input so the user
+        // doesn't accidentally resubmit the same bad code.
+        if (data.retryable && flow && flow.state === 'awaiting_code') {
+          code = ''
+        }
       } else {
         error = (e as Error).message
       }

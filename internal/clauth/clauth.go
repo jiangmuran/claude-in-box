@@ -319,9 +319,22 @@ func (f *Flow) tail() string {
 	return s
 }
 
-// SubmitCode writes the code to the PTY's stdin and waits for the claude
-// process to exit. Returns nil on success (state goes Done), error otherwise
-// (state is Failed or TimedOut).
+// ErrInvalidCode is returned when claude reported the pasted code was
+// rejected but is still alive waiting for another paste. The flow state
+// is reset to `awaiting_code` and the caller (Web UI) can paste a new
+// code without restarting the whole flow.
+var ErrInvalidCode = errors.New("clauth: claude rejected the code; paste a fresh one")
+
+// rejectMarker is what `claude auth login --claudeai` prints on a bad
+// code before re-prompting. Case-insensitive on the leading "Invalid".
+var rejectMarker = "nvalid code" // matches "Invalid code" / "invalid code"
+
+// SubmitCode writes the code to the PTY's stdin and waits for one of:
+//   - the claude process to exit cleanly       → returns nil (state=done)
+//   - the claude process to exit with error    → returns the captured stderr
+//   - claude prints "Invalid code" + re-prompts → returns ErrInvalidCode,
+//     state is reset to awaiting_code so the UI keeps the input enabled
+//   - the deadline (30s) hits                   → marks the flow failed
 func (f *Flow) SubmitCode(ctx context.Context, code string) error {
 	state := State(f.state.Load().(string))
 	if state != StateAwaitingCode {
@@ -329,22 +342,60 @@ func (f *Flow) SubmitCode(ctx context.Context, code string) error {
 	}
 	f.state.Store(string(StateVerifying))
 
+	// Watermark the output so we only scan for *new* claude messages.
+	f.mu.Lock()
+	startLen := f.output.Len()
+	f.mu.Unlock()
+
 	if _, err := f.pty.Write([]byte(strings.TrimSpace(code) + "\n")); err != nil {
 		return fmt.Errorf("clauth: write code to pty: %w", err)
 	}
 
-	select {
-	case <-f.done:
-		final := State(f.state.Load().(string))
-		if final == StateDone {
-			return nil
+	hard := time.NewTimer(30 * time.Second)
+	defer hard.Stop()
+	poll := time.NewTicker(120 * time.Millisecond)
+	defer poll.Stop()
+
+	for {
+		select {
+		case <-f.done:
+			final := State(f.state.Load().(string))
+			if final == StateDone {
+				return nil
+			}
+			if m := f.errMsg.Load(); m != nil {
+				return errors.New("clauth: " + m.(string))
+			}
+			return fmt.Errorf("clauth: flow ended in %q", final)
+
+		case <-ctx.Done():
+			return ctx.Err()
+
+		case <-hard.C:
+			f.fail(StateFailed, "claude did not respond within 30s")
+			return errors.New("clauth: timed out waiting for code verification")
+
+		case <-poll.C:
+			f.mu.Lock()
+			tail := f.output.String()
+			f.mu.Unlock()
+			if len(tail) <= startLen {
+				continue
+			}
+			chunk := tail[startLen:]
+			if strings.Contains(chunk, rejectMarker) {
+				// claude is still alive and re-prompting. Bring the
+				// flow back to awaiting_code so the UI can offer a
+				// retry without restarting the whole OAuth dance.
+				f.state.Store(string(StateAwaitingCode))
+				// advance the watermark past this rejection so a retry
+				// only scans NEW output
+				f.mu.Lock()
+				_ = f.output.Len() // (kept symmetric with startLen pattern)
+				f.mu.Unlock()
+				return ErrInvalidCode
+			}
 		}
-		if m := f.errMsg.Load(); m != nil {
-			return errors.New("clauth: " + m.(string))
-		}
-		return fmt.Errorf("clauth: flow ended in %q", final)
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 

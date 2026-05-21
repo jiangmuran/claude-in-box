@@ -37,8 +37,25 @@ var DefaultEvents = []string{
 // Settings is the minimal shape of a Claude Code settings.json we author.
 // Contains only the `hooks` section — onboarding flags live in
 // ~/.claude.json (global state) and are seeded by the entrypoint.
+//
+// The hooks shape Claude Code (v2.1.146+) expects is matcher-grouped, not
+// a flat list:
+//
+//   { "hooks": { "PreToolUse": [
+//       { "matcher": "Bash|Edit",
+//         "hooks": [ {"type":"command","command":"…"} ] }
+//   ]}}
+//
+// `matcher: ""` matches every event of that kind.
 type Settings struct {
-	Hooks map[string][]HookEntry `json:"hooks,omitempty"`
+	Hooks map[string][]HookGroup `json:"hooks,omitempty"`
+}
+
+// HookGroup binds a matcher pattern to a list of HookEntry to run when it
+// fires. Empty matcher = match-all.
+type HookGroup struct {
+	Matcher string      `json:"matcher"`
+	Hooks   []HookEntry `json:"hooks"`
 }
 
 // HookEntry is one hook registration under a single event.
@@ -72,7 +89,7 @@ func WriteSessionSettings(configDir, sessionID, token, ctlAddr string, events []
 		return "", fmt.Errorf("hooks: mkdir configDir: %w", err)
 	}
 
-	settings := Settings{Hooks: make(map[string][]HookEntry, len(events))}
+	settings := Settings{Hooks: make(map[string][]HookGroup, len(events))}
 	for _, event := range events {
 		// Single-quoted shell args: the token is hex, sessionID is uuid, and
 		// event is from our whitelist, so none of them contain shell
@@ -86,7 +103,10 @@ func WriteSessionSettings(configDir, sessionID, token, ctlAddr string, events []
 				`'http://%s/internal/hooks/%s?event=%s'`,
 			token, ctlAddr, sessionID, event,
 		)
-		settings.Hooks[event] = []HookEntry{{Type: "command", Command: cmd}}
+		settings.Hooks[event] = []HookGroup{{
+			Matcher: "",
+			Hooks:   []HookEntry{{Type: "command", Command: cmd}},
+		}}
 	}
 
 	out := filepath.Join(configDir, "settings.json")

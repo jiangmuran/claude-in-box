@@ -53,14 +53,17 @@ func TestWriteSessionSettings_ShapeAndContents(t *testing.T) {
 		t.Fatalf("hook map size = %d want 2", len(s.Hooks))
 	}
 	for _, ev := range []string{"SessionStart", "Stop"} {
-		entries, ok := s.Hooks[ev]
-		if !ok || len(entries) != 1 {
+		groups, ok := s.Hooks[ev]
+		if !ok || len(groups) != 1 {
 			t.Fatalf("hook[%s] missing", ev)
 		}
-		if entries[0].Type != "command" {
-			t.Fatalf("hook[%s].type = %q", ev, entries[0].Type)
+		if len(groups[0].Hooks) != 1 {
+			t.Fatalf("hook[%s] inner len = %d", ev, len(groups[0].Hooks))
 		}
-		cmd := entries[0].Command
+		if groups[0].Hooks[0].Type != "command" {
+			t.Fatalf("hook[%s].type = %q", ev, groups[0].Hooks[0].Type)
+		}
+		cmd := groups[0].Hooks[0].Command
 		for _, must := range []string{"curl", "deadbeef", "127.0.0.1:8080", "/internal/hooks/sess-1", "event=" + ev, HeaderHookToken} {
 			if !strings.Contains(cmd, must) {
 				t.Fatalf("hook[%s] missing %q in: %s", ev, must, cmd)

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"strconv"
@@ -70,8 +71,24 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		if oauth == "" {
 			oauth = os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")
 		}
+		// If still empty, the user might be logged in via the in-container
+		// `claude auth login --claudeai` flow — credentials live on disk
+		// under ~/.claude/.credentials.json and claude will read them
+		// without any env var. Verify that and let it through.
+		if oauth == "" && s.cfg.ClaudeAuth != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			st, err := s.cfg.ClaudeAuth.Status(ctx)
+			cancel()
+			if err == nil && st.LoggedIn {
+				break
+			}
+			writeErr(w, http.StatusBadRequest,
+				"subscription mode requires either an oauth_token in the request, a CLAUDE_CODE_OAUTH_TOKEN env var, or a `claude auth login` performed inside the container (top-right 'sign in with claude' button)")
+			return
+		}
 		if oauth == "" {
-			writeErr(w, http.StatusBadRequest, "subscription mode requires oauth_token or CLAUDE_CODE_OAUTH_TOKEN env")
+			writeErr(w, http.StatusBadRequest,
+				"subscription mode requires oauth_token, CLAUDE_CODE_OAUTH_TOKEN env, or an in-container claude login")
 			return
 		}
 	case "api_key":

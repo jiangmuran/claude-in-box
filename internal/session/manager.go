@@ -99,25 +99,38 @@ func (m *Manager) Spawn(ctx context.Context, opts SpawnOptions) (*Session, error
 	sess.state.Store(stream.StateStarting)
 	sess.parser = stream.NewParser(sess.bus)
 
-	// Install per-session hooks (writes settings.json under
-	// <session_dir>/.claude/ and sets CLAUDE_CONFIG_DIR for the child).
-	var extraEnv []string
+	// Install per-session hooks. We do NOT override CLAUDE_CONFIG_DIR here:
+	// that would cut the session off from the user's on-disk credentials
+	// (written by `claude auth login`) and force every session to depend
+	// on CLAUDE_CODE_OAUTH_TOKEN. Instead we drop a settings.json under
+	// <session_dir>/.claude/ that contains ONLY our HTTP hooks, and pass
+	// it via --settings so Claude Code merges it with the user's existing
+	// settings/credentials at ~/.claude/.
+	var settingsFile string
 	if m.ControlAddr != "" {
 		token, err := hooks.NewToken()
 		if err != nil {
 			return nil, fmt.Errorf("spawn: gen hook token: %w", err)
 		}
 		configDir := filepath.Join(dir, ".claude")
-		if _, err := hooks.WriteSessionSettings(configDir, id, token, m.ControlAddr, nil); err != nil {
+		path, err := hooks.WriteSessionSettings(configDir, id, token, m.ControlAddr, nil)
+		if err != nil {
 			return nil, fmt.Errorf("spawn: write hook settings: %w", err)
 		}
 		sess.hookToken = token
-		extraEnv = append(extraEnv, "CLAUDE_CONFIG_DIR="+configDir)
+		settingsFile = path
+	}
+
+	// Re-assemble the command args so --settings comes right after the
+	// stream-json flags. Done here (not in commandFor) because the file
+	// path is only known after the per-session hook generation above.
+	if settingsFile != "" {
+		args = append(args, "--settings", settingsFile)
 	}
 
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = opts.Workdir
-	cmd.Env = m.envFor(opts, extraEnv...)
+	cmd.Env = m.envFor(opts)
 	sess.cmd = cmd
 
 	master, err := pty.Start(cmd)

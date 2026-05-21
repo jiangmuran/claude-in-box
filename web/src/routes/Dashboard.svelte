@@ -22,6 +22,8 @@
   import InputBar from '../components/InputBar.svelte'
   import SideRail from '../components/SideRail.svelte'
   import StatusBadge from '../components/StatusBadge.svelte'
+  import LangSwitch from '../components/LangSwitch.svelte'
+  import { T } from '../lib/i18n'
   import type { ClaudeAuthStatus } from '../lib/types'
 
   let activeView = $state<'chat' | 'terminal' | 'inspector'>('chat')
@@ -95,13 +97,16 @@
   <aside class="sidebar">
     <div class="sb-head">
       <Wordmark size={26} />
-      <button class="ghost" onclick={() => logout()} title="forget token">logout</button>
+      <div class="sb-head-right">
+        <LangSwitch />
+        <button class="ghost" onclick={() => logout()} title={$T('forget token', '清除 token')}>{$T('logout', '登出')}</button>
+      </div>
     </div>
 
     <div class="sb-section">
-      <span class="divider">sessions</span>
+      <span class="divider">{$T('sessions', '会话')}</span>
       <button class="new" onclick={() => (newOpen = true)}>
-        <span class="plus">+</span><span>new session</span>
+        <span class="plus">+</span><span>{$T('new session', '新建会话')}</span>
       </button>
     </div>
 
@@ -112,8 +117,8 @@
     />
 
     <div class="sb-foot">
-      <span class="divider">box</span>
-      <span class="meta">— a portable claude code dev env —</span>
+      <span class="divider">{$T('box', '盒子')}</span>
+      <span class="meta">{$T('— a portable claude code dev env —', '— 便携 claude code 开发环境 —')}</span>
     </div>
   </aside>
 
@@ -125,7 +130,7 @@
 
       <div class="crumbs mono">
         {#if activeSession}
-          <span class="ink-3">session</span>
+          <span class="ink-3">{$T('session', '会话')}</span>
           <span class="sep">/</span>
           <span class="id">{activeSession.id.slice(0, 8)}</span>
           {#if activeSession.model}
@@ -133,7 +138,7 @@
             <span class="ink-3">{activeSession.model}</span>
           {/if}
         {:else}
-          <span class="ink-3">no session</span>
+          <span class="ink-3">{$T('no session', '没有会话')}</span>
         {/if}
       </div>
 
@@ -151,7 +156,7 @@
           {:else}
             <button class="auth-chip mono" onclick={() => (loginOpen = true)}>
               <span class="dot pulse"></span>
-              <span>sign in with claude</span>
+              <span>{$T('sign in with claude', '用 Claude 登录')}</span>
             </button>
           {/if}
         {/if}
@@ -192,13 +197,13 @@
     {:else}
       <section class="empty">
         <div class="empty-card">
-          <span class="divider">empty</span>
-          <h2 class="serif">no session yet</h2>
+          <span class="divider">{$T('empty', '空')}</span>
+          <h2 class="serif">{$T('no session yet', '还没有会话')}</h2>
           <p class="ink-3">
-            Start one and the panel will fill in.
+            {$T('Start one and the panel will fill in.', '开一个,面板就会填满。')}
             <br />
-            Press <span class="kbd">N</span> or hit
-            <button class="ghost-link" onclick={() => (newOpen = true)}>new session</button>.
+            {$T('Press', '按')} <span class="kbd">N</span> {$T('or hit', '或点')}
+            <button class="ghost-link" onclick={() => (newOpen = true)}>{$T('new session', '新建会话')}</button>.
           </p>
         </div>
       </section>
@@ -266,6 +271,11 @@
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
+  }
+  .sb-head-right {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
   }
   .sb-section { display: flex; flex-direction: column; gap: 0.65rem; }
   .sb-foot { margin-top: auto; display: flex; flex-direction: column; gap: 0.5rem; padding-top: 1rem; }

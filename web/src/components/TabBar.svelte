@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { T } from '../lib/i18n'
+
   type View = 'chat' | 'terminal' | 'inspector'
 
   interface Props {
@@ -7,14 +9,14 @@
   }
   let { active, oninput }: Props = $props()
 
-  const tabs: { id: View; label: string; sub: string }[] = [
-    { id: 'chat',       label: 'driver',    sub: 'structured' },
-    { id: 'terminal',   label: 'terminal',  sub: 'raw pty' },
-    { id: 'inspector',  label: 'inspector', sub: 'wire' },
-  ]
+  let tabs = $derived([
+    { id: 'chat' as const,       label: $T('driver', '驱动'),    sub: $T('structured', '结构化') },
+    { id: 'terminal' as const,   label: $T('terminal', '终端'),   sub: $T('raw pty', '原始 pty') },
+    { id: 'inspector' as const,  label: $T('inspector', '检视器'), sub: $T('wire', '线缆') },
+  ])
 </script>
 
-<nav class="bar" aria-label="view tabs">
+<nav class="bar" aria-label={$T('view tabs', '视图切换')}>
   {#each tabs as t (t.id)}
     <button
       class="tab"
@@ -26,7 +28,7 @@
     </button>
   {/each}
   <span class="spacer"></span>
-  <span class="badge mono">[ live ]</span>
+  <span class="badge mono">[ {$T('live', '直播')} ]</span>
 </nav>
 
 <style>

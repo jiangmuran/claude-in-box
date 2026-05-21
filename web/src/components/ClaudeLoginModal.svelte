@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte'
   import { api, ApiError } from '../lib/api'
+  import { T } from '../lib/i18n'
   import type { ClaudeFlowSnapshot } from '../lib/types'
 
   interface Props {
@@ -16,7 +17,19 @@
   let error = $state('')
   let copied = $state(false)
 
-  onMount(async () => {
+  onMount(() => { start() })
+
+  onDestroy(() => {
+    if (flow && (flow.state === 'starting' || flow.state === 'awaiting_code')) {
+      api.claudeCancel(flow.id).catch(() => {})
+    }
+  })
+
+  async function start() {
+    flow = null
+    error = ''
+    code = ''
+    starting = true
     try {
       flow = await api.claudeStart({})
     } catch (e) {
@@ -24,15 +37,14 @@
     } finally {
       starting = false
     }
-  })
+  }
 
-  onDestroy(() => {
-    // If we navigate away without finishing, cancel the in-flight flow on
-    // the server so it does not linger.
+  async function restart() {
     if (flow && (flow.state === 'starting' || flow.state === 'awaiting_code')) {
-      api.claudeCancel(flow.id).catch(() => {})
+      try { await api.claudeCancel(flow.id) } catch { /* ignore */ }
     }
-  })
+    await start()
+  }
 
   async function submit(e: SubmitEvent) {
     e.preventDefault()
@@ -43,7 +55,6 @@
       const next = await api.claudeCode(flow.id, code.trim())
       flow = next
       if (next.state === 'done') {
-        // Brief pause to let the success state visibly land before closing.
         setTimeout(onsuccess, 600)
       } else {
         error = next.error || `flow ended in ${next.state}`
@@ -67,47 +78,57 @@
       await navigator.clipboard.writeText(flow.auth_url)
       copied = true
       setTimeout(() => (copied = false), 1400)
-    } catch {
-      // ignore — manual select-copy will still work
-    }
+    } catch { /* ignore */ }
   }
+
+  let isTerminalFailure = $derived(
+    flow !== null && (flow.state === 'failed' || flow.state === 'timed_out' || flow.state === 'cancelled')
+  )
 </script>
 
 <div class="backdrop" onclick={onclose} role="presentation"></div>
 
 <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ca-title">
   <header>
-    <span class="divider">sign in with claude</span>
-    <button class="x" onclick={onclose} aria-label="close">×</button>
+    <span class="divider">{$T('sign in with claude', '用 Claude 登录')}</span>
+    <button class="x" onclick={onclose} aria-label={$T('close', '关闭')}>×</button>
   </header>
 
-  <h2 id="ca-title" class="serif">Connect your Claude account.</h2>
+  <h2 id="ca-title" class="serif">{$T('Connect your Claude account.', '连接你的 Claude 账号。')}</h2>
   <p class="lede serif">
-    The container will keep its own Claude credentials. Once signed in,
-    new sessions billing as <em class="em">subscription</em> use your
-    interactive Pro/Max quota — the only path that stays on the interactive
-    quota after the <a href="https://www.anthropic.com/news/agent-sdk-quotas" target="_blank" rel="noreferrer">2026-06-15 Agent SDK quota split</a>.
+    {$T(
+      "The container will keep its own Claude credentials. Once signed in, new sessions billing as",
+      '容器会保留它自己的 Claude 凭据。登录后,新会话只要选'
+    )}
+    <em class="em">{$T('subscription', '订阅')}</em>
+    {$T(
+      'use your interactive Pro/Max quota — the only path that stays on the interactive quota after the',
+      '就走你交互式 Pro/Max 配额 —— 这是'
+    )}
+    <a href="https://www.anthropic.com/news/agent-sdk-quotas" target="_blank" rel="noreferrer">{$T('2026-06-15 Agent SDK quota split', '2026-06-15 Agent SDK 配额拆分')}</a>{$T('.', '后唯一不被拆走的路径。')}
   </p>
 
   {#if starting}
-    <div class="state mono"><span class="spinner"></span>starting flow…</div>
+    <div class="state mono"><span class="spinner"></span>{$T('starting flow…', '正在启动流程…')}</div>
   {:else if !flow}
-    <div class="state err mono">[ flow could not start{error ? ' — ' + error : ''} ]</div>
+    <div class="state err mono">[ {$T('flow could not start', '流程未能启动')}{error ? ' — ' + error : ''} ]
+      <button class="retry" type="button" onclick={restart}>{$T('try again', '重试')}</button>
+    </div>
   {:else if flow.state === 'done'}
-    <div class="state ok mono">[ signed in — closing in a moment ]</div>
+    <div class="state ok mono">[ {$T('signed in — closing in a moment', '已登录 — 马上关闭')} ]</div>
   {:else}
     <ol class="steps">
       <li>
         <span class="num">01</span>
         <div class="step-body">
-          <span class="step-text serif">Open this URL in any browser and authorise:</span>
+          <span class="step-text serif">{$T('Open this URL in any browser and authorise:', '在浏览器里打开这个 URL 并授权:')}</span>
           {#if flow.auth_url}
             <div class="url-row">
               <a href={flow.auth_url} target="_blank" rel="noreferrer" class="url-link mono">
                 {flow.auth_url.length > 78 ? flow.auth_url.slice(0, 78) + '…' : flow.auth_url}
               </a>
-              <button type="button" class="copy" onclick={copy} title="copy url">
-                <span class="mono">{copied ? 'copied' : 'copy'}</span>
+              <button type="button" class="copy" onclick={copy} title={$T('copy url', '复制 URL')}>
+                <span class="mono">{copied ? $T('copied', '已复制') : $T('copy', '复制')}</span>
               </button>
             </div>
           {/if}
@@ -116,18 +137,23 @@
       <li>
         <span class="num">02</span>
         <div class="step-body">
-          <span class="step-text serif">Claude redirects you to <code>platform.claude.com</code> and shows a one-time code. Paste it here:</span>
+          <span class="step-text serif">
+            {$T(
+              'Claude redirects you to platform.claude.com and shows a one-time code. Paste it here:',
+              'Claude 会把你跳转到 platform.claude.com 显示一段一次性 code,粘贴到这里:'
+            )}
+          </span>
           <form class="code-form" onsubmit={submit}>
             <input
               type="text"
               bind:value={code}
-              placeholder="paste code here…"
+              placeholder={$T('paste code here…', '把 code 粘到这里…')}
               spellcheck="false"
               autocomplete="off"
               disabled={verifying || flow.state !== 'awaiting_code'}
             />
             <button class="primary" type="submit" disabled={verifying || !code.trim() || flow.state !== 'awaiting_code'}>
-              {verifying ? 'verifying…' : 'finish'} <span class="kbd">↵</span>
+              {verifying ? $T('verifying…', '验证中…') : $T('finish', '完成')} <span class="kbd">↵</span>
             </button>
           </form>
         </div>
@@ -135,12 +161,20 @@
     </ol>
   {/if}
 
-  {#if error && flow && flow.state !== 'done'}
+  {#if isTerminalFailure}
+    <div class="recover mono">
+      <span>[ {flow?.state} — {error || flow?.error || $T('flow did not complete', '流程未完成')} ]</span>
+      <button class="retry" type="button" onclick={restart}>{$T('start over', '重新开始')}</button>
+    </div>
+  {:else if error && flow && flow.state !== 'done'}
     <p class="err mono">[ {error} ]</p>
   {/if}
 
   <footer>
-    <span class="hint mono">— credentials live in the container's $CLAUDE_CONFIG_DIR —</span>
+    <span class="hint mono">{$T(
+      "— credentials live in the container's $CLAUDE_CONFIG_DIR —",
+      '— 凭据存放在容器的 $CLAUDE_CONFIG_DIR —'
+    )}</span>
   </footer>
 </div>
 
@@ -157,6 +191,9 @@
     position: fixed;
     top: 50%;
     left: 50%;
+    /* IMPORTANT: keep this transform as the ONLY transform on .modal;
+       app.css's `rise` keyframe is opacity-only specifically so it does
+       not clobber this centering. */
     transform: translate(-50%, -50%);
     z-index: 31;
     width: min(42rem, 94vw);
@@ -260,11 +297,6 @@
     font-variation-settings: 'opsz' 14, 'SOFT' 70;
     color: var(--ink-2);
   }
-  .step-text code {
-    font-family: var(--font-mono);
-    font-size: 0.85em;
-    color: var(--coral-dark);
-  }
 
   .url-row {
     display: flex;
@@ -329,6 +361,29 @@
     font-size: 12px;
     margin: 0;
   }
+
+  .recover {
+    border: 1px dashed var(--danger);
+    background: rgba(168, 40, 28, 0.06);
+    color: var(--danger);
+    padding: 0.7rem 0.85rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 12px;
+  }
+  .retry {
+    border: 1px solid currentColor;
+    border-radius: var(--r-xs);
+    padding: 0.3rem 0.7rem;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--coral-dark);
+    background: transparent;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  .retry:hover { background: var(--coral); color: var(--cream); border-color: var(--coral); }
 
   footer { padding-top: 0.4rem; text-align: center; }
   .hint {

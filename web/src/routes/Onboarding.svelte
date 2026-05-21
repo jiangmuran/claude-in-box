@@ -1,7 +1,9 @@
 <script lang="ts">
   import { authToken } from '../lib/stores'
   import { api, ApiError } from '../lib/api'
+  import { T } from '../lib/i18n'
   import Wordmark from '../components/Wordmark.svelte'
+  import LangSwitch from '../components/LangSwitch.svelte'
 
   let token = $state('')
   let busy = $state(false)
@@ -17,13 +19,11 @@
     error = ''
     authToken.set(token.trim())
     try {
-      // Validate by calling a protected route. listSessions is cheap.
       await api.listSessions()
-      // success — App.svelte re-renders into Dashboard.
     } catch (err) {
       authToken.set('')
       if (err instanceof ApiError) {
-        error = err.status === 401 || err.status === 403 ? 'token rejected' : err.message
+        error = err.status === 401 || err.status === 403 ? $T('token rejected', 'token 不被接受') : err.message
       } else {
         error = (err as Error).message
       }
@@ -38,31 +38,33 @@
 
   <header class="top">
     <Wordmark size={28} />
-    <span class="version">
-      {#if health?.version}{health.version} · {health.mode}{:else}—{/if}
+    <span class="right">
+      {#if health?.version}<span class="version">{health.version} · {health.mode}</span>{/if}
+      <LangSwitch />
     </span>
   </header>
 
   <section class="hero">
-    <div class="rule"><span class="divider">welcome</span></div>
+    <div class="rule"><span class="divider">{$T('welcome', '欢迎')}</span></div>
 
     <h1 class="title serif">
-      Run Claude Code <br /><em class="em">anywhere.</em>
+      {$T('Run Claude Code', '让 Claude Code')} <br /><em class="em">{$T('anywhere.', '跑在任何地方。')}</em>
     </h1>
 
     <p class="lede serif">
-      You are looking at a control plane for a real, batteries-included
-      development environment with Claude Code running inside it. To start,
-      paste the master API key your box was minted with at boot
+      {$T(
+        'You are looking at a control plane for a real, batteries-included development environment with Claude Code running inside it. To start, paste the master API key your box was minted with at boot',
+        '这是一个把按需开发环境 + Claude Code 打包进去的控制面。开始之前,粘贴容器启动时生成的主 API key'
+      )}
       (<code>CIB_AUTH_TOKEN</code>).
     </p>
 
     <form class="card" onsubmit={submit}>
       <label class="field">
-        <span class="label">api key</span>
+        <span class="label">{$T('api key', 'api key')}</span>
         <input
           bind:value={token}
-          placeholder="cib_xxxxxxxxxxxxxxxxxxxx"
+          placeholder={$T('paste your master token here', '粘贴主 token 到这里')}
           autocomplete="off"
           spellcheck="false"
           disabled={busy}
@@ -70,7 +72,7 @@
       </label>
       <div class="actions">
         <button class="primary" type="submit" disabled={busy || !token.trim()}>
-          {busy ? 'verifying…' : 'unlock'} <span class="kbd">↵</span>
+          {busy ? $T('verifying…', '验证中…') : $T('unlock', '解锁')} <span class="kbd">↵</span>
         </button>
         {#if error}
           <span class="err mono">[ {error} ]</span>
@@ -78,30 +80,32 @@
       </div>
     </form>
 
-    <div class="rule"><span class="divider">what next</span></div>
+    <div class="rule"><span class="divider">{$T('what next', '接下来')}</span></div>
 
     <ol class="steps">
       <li>
         <span class="num">01</span>
         <span class="step-body">
-          Validate this control plane is healthy:
+          {$T('Validate this control plane is healthy:', '先确认这个控制面是健康的:')}
           <code>curl http://&lt;your-box&gt;:8080/api/health</code>.
         </span>
       </li>
       <li>
         <span class="num">02</span>
         <span class="step-body">
-          Pass <code>CLAUDE_CODE_OAUTH_TOKEN</code> (from
-          <code>claude setup-token</code> on your laptop) or
-          <code>ANTHROPIC_API_KEY</code> via <code>docker run -e</code>.
-          The first session you start will inherit it.
+          {$T(
+            'Pass CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token` on your laptop) or ANTHROPIC_API_KEY via docker run -e. The first session you start will inherit it.',
+            '通过 docker run -e 注入 CLAUDE_CODE_OAUTH_TOKEN(在本机 `claude setup-token` 拿到)或 ANTHROPIC_API_KEY。新开的会话会继承这个凭据。'
+          )}
         </span>
       </li>
       <li>
         <span class="num">03</span>
         <span class="step-body">
-          Want to talk to the box from a phone, MCU, or another agent?
-          Mint a device-scoped token from the dashboard once you are in.
+          {$T(
+            'Want to talk to the box from a phone, MCU, or another agent? Mint a device-scoped token from the dashboard once you are in.',
+            '想从手机、单片机或别的 agent 连这个 box?登录之后在仪表盘签发一个设备级 token 就行。'
+          )}
         </span>
       </li>
     </ol>
@@ -142,7 +146,11 @@
     z-index: 1;
     animation: fade 600ms ease 80ms both;
   }
-
+  .right {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
   .version {
     font-family: var(--font-mono);
     font-size: 12px;

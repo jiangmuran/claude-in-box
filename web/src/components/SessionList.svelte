@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { T } from '../lib/i18n'
   import type { Session } from '../lib/types'
 
   interface Props {
@@ -36,7 +37,7 @@
     </li>
   {/each}
   {#if sessions.length === 0}
-    <li class="empty">— no sessions —</li>
+    <li class="empty">{$T('— no sessions —', '— 暂无会话 —')}</li>
   {/if}
 </ul>
 

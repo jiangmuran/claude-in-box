@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api'
+  import { T } from '../lib/i18n'
   import type { Session } from '../lib/types'
 
   interface Props {
@@ -39,24 +40,26 @@
 
 <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ns-title">
   <header>
-    <span class="divider">new session</span>
-    <button class="x" onclick={onclose} aria-label="close">×</button>
+    <span class="divider">{$T('new session', '新建会话')}</span>
+    <button class="x" onclick={onclose} aria-label={$T('close', '关闭')}>×</button>
   </header>
 
-  <h2 id="ns-title" class="serif">Spin up Claude Code.</h2>
+  <h2 id="ns-title" class="serif">{$T('Spin up Claude Code.', '把 Claude Code 拉起来。')}</h2>
   <p class="lede serif">
-    The container will <code>spawn claude</code> in a PTY and start streaming
-    structured frames the moment it boots.
+    {$T(
+      'The container will spawn claude in a PTY and start streaming structured frames the moment it boots.',
+      '容器会在 PTY 里 spawn 一个 claude,启动那一刻就开始往外推结构化事件帧。'
+    )}
   </p>
 
   <form onsubmit={create}>
     <label class="field">
-      <span class="label">workdir</span>
+      <span class="label">{$T('workdir', '工作目录')}</span>
       <input bind:value={workdir} spellcheck="false" />
     </label>
 
     <label class="field">
-      <span class="label">model · optional</span>
+      <span class="label">{$T('model · optional', '模型 · 可选')}</span>
       <input
         bind:value={model}
         placeholder="claude-sonnet-4-6 / claude-opus-4-7 / …"
@@ -65,7 +68,7 @@
     </label>
 
     <div class="field">
-      <span class="label">billing</span>
+      <span class="label">{$T('billing', '计费')}</span>
       <div class="seg">
         <button
           type="button"
@@ -73,7 +76,7 @@
           class:active={authMode === 'subscription'}
           onclick={() => (authMode = 'subscription')}
         >
-          subscription
+          {$T('subscription', '订阅')}
         </button>
         <button
           type="button"
@@ -81,17 +84,20 @@
           class:active={authMode === 'api_key'}
           onclick={() => (authMode = 'api_key')}
         >
-          api key
+          {$T('api key', 'api key')}
         </button>
       </div>
       <p class="hint mono">
-        — uses the container env (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY) —
+        {$T(
+          '— uses the container env (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY) —',
+          '— 使用容器内的 env(CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY)—'
+        )}
       </p>
     </div>
 
     <div class="actions">
       <button class="primary" type="submit" disabled={busy}>
-        {busy ? 'spawning…' : 'launch'} <span class="kbd">↵</span>
+        {busy ? $T('spawning…', '启动中…') : $T('launch', '启动')} <span class="kbd">↵</span>
       </button>
       {#if error}<span class="err mono">[ {error} ]</span>{/if}
     </div>
@@ -153,7 +159,6 @@
     font-variation-settings: 'opsz' 14, 'SOFT' 70;
     font-size: 0.95rem;
   }
-  .lede code { font-family: var(--font-mono); font-size: 0.85em; color: var(--coral-dark); }
 
   form {
     display: flex;

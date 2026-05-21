@@ -1,5 +1,6 @@
 <script lang="ts">
   import { todos, usage, status, frames } from '../lib/stores'
+  import { T } from '../lib/i18n'
   import type { Frame, TodoItem } from '../lib/types'
 
   type ToolCall = { seq: number; tool: string; durationMs?: number; error?: string; ok: boolean }
@@ -37,7 +38,7 @@
 
 <div class="rail-inner">
   <section>
-    <span class="divider">todos</span>
+    <span class="divider">{$T('todos', '待办')}</span>
     <ul class="todos">
       {#each $todos as t, i (i)}
         <li>
@@ -46,13 +47,13 @@
         </li>
       {/each}
       {#if $todos.length === 0}
-        <li class="empty mono">— none yet —</li>
+        <li class="empty mono">{$T('— none yet —', '— 暂无 —')}</li>
       {/if}
     </ul>
   </section>
 
   <section>
-    <span class="divider">tool calls</span>
+    <span class="divider">{$T('tool calls', '工具调用')}</span>
     <ul class="tools">
       {#each toolCalls as tc (tc.seq)}
         <li class:err={tc.error}>
@@ -62,31 +63,31 @@
         </li>
       {/each}
       {#if toolCalls.length === 0}
-        <li class="empty mono">— none yet —</li>
+        <li class="empty mono">{$T('— none yet —', '— 暂无 —')}</li>
       {/if}
     </ul>
   </section>
 
   <section>
-    <span class="divider">usage</span>
+    <span class="divider">{$T('usage', '用量')}</span>
     {#if u}
       <dl class="usage">
-        <dt>in</dt><dd class="mono">{u.input ?? 0}</dd>
-        <dt>out</dt><dd class="mono">{u.output ?? 0}</dd>
-        {#if u.cache_read != null}<dt>cache</dt><dd class="mono">{u.cache_read}</dd>{/if}
+        <dt>{$T('in', '入')}</dt><dd class="mono">{u.input ?? 0}</dd>
+        <dt>{$T('out', '出')}</dt><dd class="mono">{u.output ?? 0}</dd>
+        {#if u.cache_read != null}<dt>{$T('cache', '缓存')}</dt><dd class="mono">{u.cache_read}</dd>{/if}
       </dl>
     {:else}
-      <p class="empty mono">— waiting for first turn —</p>
+      <p class="empty mono">{$T('— waiting for first turn —', '— 等待第一轮 —')}</p>
     {/if}
   </section>
 
   <section>
-    <span class="divider">status</span>
+    <span class="divider">{$T('status', '状态')}</span>
     {#if st}
       <p class="status mono">[ {String(st.state).replace(/_/g, ' ')} ]</p>
-      {#if st.elapsed_ms != null}<p class="elapsed mono">elapsed · {Math.round(st.elapsed_ms / 1000)}s</p>{/if}
+      {#if st.elapsed_ms != null}<p class="elapsed mono">{$T('elapsed', '已用')} · {Math.round(st.elapsed_ms / 1000)}s</p>{/if}
     {:else}
-      <p class="empty mono">— idle —</p>
+      <p class="empty mono">{$T('— idle —', '— 空闲 —')}</p>
     {/if}
   </section>
 </div>

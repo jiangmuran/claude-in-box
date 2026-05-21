@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api'
+  import { T } from '../lib/i18n'
 
   interface Props { sessionId: string; disabled: boolean }
   let { sessionId, disabled }: Props = $props()
@@ -55,15 +56,17 @@
     onkeydown={onkeydown}
     oninput={resize}
     rows="1"
-    placeholder={disabled ? 'session stopped — open a new one' : 'message claude · enter to send · shift+enter for newline'}
+    placeholder={disabled
+      ? $T('session stopped — open a new one', '会话已结束 — 开一个新的')
+      : $T('message claude · enter to send · shift+enter for newline', '给 claude 发消息 · 回车发送 · shift+回车换行')}
     {disabled}
     spellcheck="false"
   ></textarea>
   <div class="ctl">
     {#if error}
-      <span class="err mono" title={error}>[ err ]</span>
+      <span class="err mono" title={error}>[ {$T('err', '错误')} ]</span>
     {/if}
-    <button type="button" class="ghost" onclick={interrupt} disabled={disabled} title="ctrl+c">
+    <button type="button" class="ghost" onclick={interrupt} disabled={disabled} title={$T('ctrl+c interrupt', 'ctrl+c 中断')}>
       <span class="mono">^C</span>
     </button>
     <button type="submit" class="send" disabled={disabled || busy || !text.trim()}>

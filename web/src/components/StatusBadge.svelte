@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { T } from '../lib/i18n'
   import type { SessionState } from '../lib/types'
   import type { ConnectionState } from '../lib/ws'
 
@@ -8,17 +9,30 @@
   }
   let { state, connection }: Props = $props()
 
-  let label = $derived.by(() => {
+  let key = $derived.by(() => {
     if (connection === 'connecting' || connection === 'idle') return 'connecting'
     if (connection === 'error' || connection === 'closed') return 'reconnecting'
     return state ?? 'idle'
   })
-  let cls = $derived(`tag tag-${label.replace(/_/g, '-')}`)
+
+  let labels: Record<string, [string, string]> = $derived({
+    connecting:        ['connecting',        '连接中'],
+    reconnecting:      ['reconnecting',      '重连中'],
+    starting:          ['starting',          '启动中'],
+    idle:              ['idle',              '空闲'],
+    working:           ['working',           '工作中'],
+    waiting_for_input: ['waiting for input', '等待输入'],
+    stopped:           ['stopped',           '已停止'],
+    failed:            ['failed',            '失败'],
+  })
+
+  let cls = $derived(`tag tag-${String(key).replace(/_/g, '-')}`)
+  let label = $derived($T(...(labels[String(key)] ?? [String(key), String(key)])))
 </script>
 
 <span class={cls}>
   <span class="d"></span>
-  <span class="t mono">{label.replace(/_/g, ' ')}</span>
+  <span class="t mono">{label}</span>
 </span>
 
 <style>

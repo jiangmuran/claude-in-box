@@ -18,6 +18,8 @@ import (
 	"github.com/jiangmuran/claude-in-box/internal/auth"
 	"github.com/jiangmuran/claude-in-box/internal/clauth"
 	"github.com/jiangmuran/claude-in-box/internal/fsapi"
+	"github.com/jiangmuran/claude-in-box/internal/prefs"
+	"github.com/jiangmuran/claude-in-box/internal/providers"
 	"github.com/jiangmuran/claude-in-box/internal/server"
 	"github.com/jiangmuran/claude-in-box/internal/session"
 	"github.com/jiangmuran/claude-in-box/internal/shell"
@@ -94,6 +96,14 @@ func run(addr, dataDir, claudeBin string) error {
 	claudeAuth := clauth.NewManager(claudeBin)
 	shellMgr := shell.NewManager("/workspace")
 	files := fsapi.NewManager()
+	providersStore, err := providers.NewStore(filepath.Join(dataDir, "providers.json"))
+	if err != nil {
+		return fmt.Errorf("init providers store: %w", err)
+	}
+	prefsStore, err := prefs.NewStore(filepath.Join(dataDir, "prefs.json"))
+	if err != nil {
+		return fmt.Errorf("init prefs store: %w", err)
+	}
 
 	srv := server.New(server.Config{
 		Mode:       mode,
@@ -102,6 +112,8 @@ func run(addr, dataDir, claudeBin string) error {
 		ClaudeAuth: claudeAuth,
 		Shells:     shellMgr,
 		Files:      files,
+		Providers:  providersStore,
+		Prefs:      prefsStore,
 		Version:    version,
 		Commit:     commit,
 	})

@@ -64,7 +64,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     GOPATH=/home/coder/go \
-    PATH=/usr/local/go/bin:/home/coder/go/bin:/usr/local/bin:/usr/bin:/bin
+    PATH=/usr/local/go/bin:/home/coder/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Core tools + transparent-SOCKS5 prerequisites + Python + Rust toolchain.
 # `passwd` is required for `useradd` (debian-slim strips it from the base).

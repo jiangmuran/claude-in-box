@@ -1,0 +1,30 @@
+# redsocks config template — filled in by docker/entrypoint.sh once the M1.6
+# transparent-SOCKS5 work lands. Placeholder for now.
+#
+# Variables (substituted by entrypoint via envsubst):
+#   ${UPSTREAM_HOST}        host or IP of the upstream SOCKS5 server
+#   ${UPSTREAM_PORT}        port of the upstream SOCKS5 server
+#   ${UPSTREAM_USER:-}      optional username
+#   ${UPSTREAM_PASS:-}      optional password
+#   ${REDSOCKS_LOCAL_PORT:-12345}
+#
+# After substitution this file is dropped at /etc/claude-in-box/redsocks.conf
+# and redsocks is started in the foreground from the entrypoint.
+
+base {
+    log_debug = off;
+    log_info = on;
+    log = stderr;
+    daemon = off;
+    redirector = iptables;
+}
+
+redsocks {
+    local_ip   = 127.0.0.1;
+    local_port = ${REDSOCKS_LOCAL_PORT:-12345};
+    ip         = ${UPSTREAM_HOST};
+    port       = ${UPSTREAM_PORT};
+    type       = socks5;
+    login      = "${UPSTREAM_USER:-}";
+    password   = "${UPSTREAM_PASS:-}";
+}

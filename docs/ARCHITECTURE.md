@@ -8,20 +8,16 @@
 
 A Debian-slim image with:
 
-- Common language runtimes (Node, Python, Go, Rust) — kept minimal, extend per project via overlay images.
+- Common language runtimes (Node, Python, Go, Rust) bundled in by default. This is **the complete dev environment** image; sessions get a real shell with real tools, not a stripped one.
 - `claude` CLI preinstalled and pinned to a known version.
 - A non-root `coder` user with sudo, `/workspace` as its home.
-- `redsocks` plus `nftables` preinstalled to back the transparent SOCKS5 layer (§8).
+- `redsocks` plus `nftables` preinstalled to back the transparent SOCKS5 layer (§9).
 - An entrypoint that boots the control plane instead of dropping into a shell.
+- The Web UI bundle baked in; whether it is served on `/` is controlled at runtime by `CIB_MODE` (default = serve; `headless` = API-only, `/` returns 404).
 
-Two image flavors:
+There is **one image, one tag**. No separate headless image. The same `:latest` runs both interactive desktops and API-only deployments — they differ only in env vars.
 
-| Tag | Includes Web UI | Use case | Approx size |
-|-----|-----------------|----------|-------------|
-| `:latest` | yes | desktop, server | ~280 MB |
-| `:latest-headless` | no | embedded, CI, agent-only | ~140 MB |
-
-All flavors built multi-arch: `linux/amd64`, `linux/arm64`, `linux/arm/v7`.
+The image is built multi-arch for `linux/amd64` and `linux/arm64`. **`armv7` is deliberately not built**: the project targets real servers because Claude Code must stay in interactive REPL mode to consume the Anthropic subscription quota (see §3 and §4), and a real server is not an armv7 SBC. The "embedded" side of the project is the *client* (§14), not the server.
 
 ### 2. Control plane
 
@@ -37,15 +33,29 @@ The control plane owns the session manager, the hooks runtime, the streaming bri
 
 ### 3. Session manager
 
-Each Claude Code session is a child process attached to a pseudo-terminal (PTY).
+Each Claude Code session is a child process attached to a pseudo-terminal (PTY). **Claude Code is always launched in interactive REPL mode** — never with `--print` — because subscription-quota billing only applies to interactive runs. Hook-driven structured event capture (§5) is what makes interactive mode equivalent to "structured output" for our purposes.
+
+Spawn command shape:
+
+```
+claude
+  --output-format stream-json
+  --include-hook-events
+  --dangerously-skip-permissions          # off if requested
+  --model <model>
+  [--resume <session_id>]
+  --settings <per-session merged settings.json>
+```
+
+`--output-format stream-json --include-hook-events` is layered on top **if** Claude Code supports it in interactive mode; if it does not, hooks alone carry the structured channel and the raw PTY carries the visible output.
 
 Responsibilities:
 
 - `spawn(workdir, env, args, options)` returns `session_id`.
   - Default `options.bypass_permissions = true` because the container is the sandbox.
-  - `options.resume_from = <session_id>` brings a previous session back with its full transcript.
+  - `options.resume_from = <session_id>` brings a previous session back with its full transcript via `--resume`.
   - `options.auth = { mode: "subscription" | "api_key", … }` declares how Claude is billed for this session (§4).
-  - `options.model = "claude-opus-4-7" | ...` sets the initial model.
+  - `options.model = "claude-opus-4-x" | "claude-sonnet-4-x" | ...` sets the initial model.
 - `attach(session_id)` exposes the structured frame stream and a writable stdin handle.
 - `write(session_id, bytes | text_frame)` — used by both human input and the input simulator.
 - `set_model(session_id, model)` — issues the `/model` slash command inside the PTY and emits a `meta` frame.
@@ -53,7 +63,7 @@ Responsibilities:
 - `kill(session_id, signal)`.
 - Lifecycle persistence: each session has a directory under `sessions/<id>/` containing:
   - `meta.json` — workdir, env, model, auth mode, created_at, stopped_at, ...
-  - `transcript.jsonl` — append-only structured frames (§6) for resume and audit
+  - `transcript.jsonl` — append-only structured frames (§6) for resume and audit; CC's own `~/.claude/projects/<hash>/<id>.jsonl` is the upstream source of truth.
   - `output.log` — raw PTY capture for terminal replay
   - `hooks/` — per-session hook overrides
 
@@ -61,17 +71,23 @@ PTY backing supports TUI features (cursor, colors, line editing) and gives the i
 
 ### 4. Claude authentication (per session)
 
-Two modes coexist:
+Two modes coexist; subscription is the default for personal use because it is what most users already pay for.
 
-**Subscription** — uses an Anthropic claude.ai account.
+**Subscription via long-lived OAuth token (M1–M2 primary path).**
 
-- A small `claude-in-box login` flow inside the container drives the standard `claude login` device-code path.
-- Credentials persist in `/home/coder/.claude/` on a mounted volume so they survive container restarts.
-- One subscription account can power multiple parallel sessions (subject to the account's own concurrency rules).
+- The user runs `claude setup-token` on their laptop (a one-time command) and is given a long-lived OAuth token.
+- That token is passed to the container as `CLAUDE_CODE_OAUTH_TOKEN`, or per-session via the create API.
+- Claude Code inside the container, running interactive, treats this as a logged-in session and bills against the Anthropic subscription. No `~/.claude/.credentials.json` refresh-token gymnastics inside the container.
+- `~/.claude/` is still mounted as a volume so transcripts, settings, and MCP config persist across restarts.
 
-**API key** — uses `ANTHROPIC_API_KEY=sk-ant-...`.
+**Subscription via in-container interactive `claude /login` (M3).**
 
-- Container-level default via env var; per-session override via the create API.
+- For users who do not want to handle `claude setup-token` on the host.
+- The Web UI drives a PTY-backed `claude /login` flow inside the container, with an OAuth callback route on the control plane to receive the auth code.
+
+**API key.**
+
+- Container-level default via `ANTHROPIC_API_KEY=sk-ant-...`; per-session override via the create API.
 - Each session's billing isolation is the API key it was started with.
 
 A session's auth mode is fixed at create time but a new session can be spawned with a different mode at any time. The dashboard rolls up usage per session and per auth identity.
@@ -141,6 +157,16 @@ For shops already on an MQTT bus. Each session's structured frames are republish
 
 Length-prefixed framing over a raw TCP socket with AES-GCM payloads, for the absolute-minimum-footprint case.
 
+#### 7.7 Anthropic-compatible API (M3)
+
+`POST /v1/messages` and `POST /v1/messages?stream=true` mimic `api.anthropic.com`. Incoming Messages-API-shaped requests are translated to an ephemeral or named session under the hood; outgoing events come back as Anthropic-shaped `message`, `content_block_delta`, `message_delta` SSE chunks.
+
+This is a **format adapter over the same session bus**, not a parallel runtime. The point is: any existing Claude SDK can set `base_url` to the box and transparently get subscription-backed Claude routed through it.
+
+#### 7.8 OpenAI-compatible API (M3)
+
+`POST /openai/v1/chat/completions` accepts OpenAI Chat Completions request shape, returns OpenAI-shaped chunks. Same underlying session, mostly field renaming plus tool-call translation. Lets any tool that already speaks the OpenAI API target the box.
+
 ### 8. Attach
 
 Three ways to dial in:
@@ -179,19 +205,29 @@ anything else ─╯
 
 ### 11. Web UI
 
-Minimal but real:
+The Web UI surfaces **three concurrent views** on the same underlying session. A user can switch between them, or open them side-by-side, depending on whether they want CC's native TUI, a no-terminal experience, or a developer-facing wire view.
 
-- Sidebar: session list with state badges and token-usage sparklines.
-- Main pane: xterm.js terminal bound to the WebSocket stream.
-- Side panels rendered from the structured frame stream:
-  - Live todo list (`todo.update`).
-  - Tool-call log (`tool.use.*`).
-  - Token / time meter (`usage`, `status`).
-  - AskUserQuestion modal (`ask.question`) with the multi-select / single-select form.
-- Top bar: model picker, auth-mode picker, hook editor, settings.
-- Mobile-responsive (the whole point is using it from a phone or tablet).
+**View A — Raw virtual terminal.**
 
-In `headless` mode this layer is absent; `/` returns 404, only `/api/*`, `/ws/*`, `/sse/*`, `/aes/*` are served.
+- xterm.js bound to the PTY's raw byte stream (`pty.raw` frames).
+- Renders CC's native TUI verbatim: resume picker, slash-command menu, ANSI colors, etc.
+- The right surface when the CC TUI is the most natural UX.
+
+**View B — Web-native Claude driver.**
+
+- Chat-style transcript rendered from `text.delta`, `tool.use.*`, `todo.update`, `ask.question` frames.
+- Side rails: live todo list (`todo.update`), tool-call timeline (`tool.use.*`), token / time meter (`usage`, `status`).
+- Top bar: session sidebar, model picker, auth-mode picker, hook editor.
+- Mobile-responsive — this is the view that makes a phone a viable client.
+
+**View C — API inspector.**
+
+- Devtools-style stream of every frame on the bus and every HTTP request/response on the wire.
+- For developers building against the box.
+
+All three views read from the same frame bus; switching between them does not interrupt the session.
+
+In `headless` mode this layer is absent; `/` returns 404, and only `/api/*`, `/ws/*`, `/sse/*`, `/aes/*`, `/v1/messages*` (when M3 lands), and `/openai/v1/chat/completions` (M3) are served.
 
 ### 12. REST API (sketch)
 
@@ -224,36 +260,43 @@ SSE    /api/sessions/:id/events        ?from=<seq>
 POST   /aes/sessions/:id/input         AES envelope, see AES-TRANSPORT.md
 POST   /aes/sessions/:id/events/poll   AES envelope, long-poll for frames
 ... (mirror of /api/* under /aes/*)
+
+# Format adapters (M3)
+POST   /v1/messages                            Anthropic Messages API (non-stream)
+POST   /v1/messages?stream=true                Anthropic Messages API (SSE)
+POST   /openai/v1/chat/completions             OpenAI Chat Completions (with stream flag)
 ```
 
-All routes except `/api/health` require auth (§10).
+All routes except `/api/health`, `/aes/time`, and `/aes/keyinfo` require auth (§10). The Anthropic- and OpenAI-compatible adapters accept either a bearer token or the API key in the original SDK's expected header.
 
-### 13. Embedded / headless mode
+### 13. API-only ("headless") runtime mode
 
-`claude-in-box` is sized to run on small ARM boxes — Raspberry Pi 4/5, N100 mini PCs, Rockchip SBCs.
+`CIB_MODE=headless` flips a single switch in the control plane: `/` returns 404, the Web UI bundle is not served, and only the API surfaces are exposed (`/api/*`, `/ws/*`, `/sse/*`, `/aes/*`, plus M3 format adapters). The image is the same `:latest` — there is no second tag.
 
-Tuning for this:
-
-- Headless image drops the UI bundle (saves ~140 MB).
-- No bundled language runtimes in the headless variant; install on demand inside a session.
-- One PTY per session, no per-session container. A 4 GB SBC can host roughly four concurrent Claude Code sessions.
-- CPU and memory accounting per session exposed via `/api/sessions/:id` and `/api/usage`.
-- Cross-compiled multi-arch images, same `docker run` line everywhere.
-
-Recommended embedded deployment:
+Recommended for: CI runners, agent-only deployments, machines that should never expose a human-facing UI.
 
 ```bash
 docker run -d --restart unless-stopped \
-  --memory=2g --cpus=2 \
   -p 8080:8080 \
+  --cap-add NET_ADMIN \
   -e CIB_MODE=headless \
   -e CIB_AUTH_TOKEN=... \
+  -e CLAUDE_CODE_OAUTH_TOKEN=cclo_... \
   -e CIB_PROXY_URL=socks5://... \
   -v /opt/claude-box/sessions:/var/lib/claude-in-box/sessions \
   -v /opt/claude-box/workspace:/workspace \
   -v /opt/claude-box/claude-home:/home/coder/.claude \
-  ghcr.io/jiangmuran/claude-in-box:latest-headless
+  ghcr.io/jiangmuran/claude-in-box:latest
 ```
+
+### 14. Embedded *clients* (not the server)
+
+The server is intentionally **not** sized for embedded hosts — running CC in interactive mode against subscription quota wants a real machine. What is embedded-friendly is the *client*.
+
+- **AES envelope** (§7.2) is designed so an ESP32 / STM32 / RP2040 with only an HTTP client and an AES-GCM implementation can be a first-class participant.
+- **Polling events endpoint** (`POST /aes/sessions/:id/events/poll`) means the device never needs to hold a long-lived socket open; it can wake every few seconds, fetch any new frames since `from=<seq>`, and go back to sleep.
+- A reference C client lives at `clients/c/` (mbedtls-based, ~300 LOC), with a sibling ESP-IDF example. Rust and Python reference clients land in M3.
+- Devices identify themselves with a device-scoped token minted by the admin (§10) and each gets its own scope set, revocable independently.
 
 ## Open questions
 

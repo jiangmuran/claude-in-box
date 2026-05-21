@@ -7,56 +7,68 @@
 </p>
 
 <p align="center">
-  <em>Run Claude Code anywhere. One container. Web-managed. Reachable from any device, down to a microcontroller.</em>
+  <em>Run Claude Code on a real server. Drive it from anywhere — browser, phone, IoT board, even an MCU — through one web port.</em>
 </p>
 
 <p align="center">
   <a href="#status"><img src="https://img.shields.io/badge/status-early%20WIP-orange" alt="status: early WIP"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-D97757" alt="MIT licensed"></a>
   <img src="https://img.shields.io/badge/docker-multi--arch-2496ED?logo=docker&logoColor=white" alt="docker multi-arch">
-  <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64%20%7C%20armv7-success" alt="amd64 / arm64 / armv7">
+  <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-success" alt="amd64 / arm64">
 </p>
 
 ---
 
 ## What is this
 
-`claude-in-box` packages a full on-demand development environment together with [Claude Code](https://www.anthropic.com/claude-code) into a single Docker container, then exposes it as a web service.
+`claude-in-box` packages a full on-demand development environment together with [Claude Code](https://www.anthropic.com/claude-code) into a single Docker container, then exposes it as a web service over **one port**.
+
+You run it on a real server (cloud VM, dedicated host, beefy home machine). Inside the container, Claude Code runs in **full interactive REPL mode** — that is non-negotiable, because that is the only mode in which the Anthropic subscription quota is consumed; `--print` / headless invocations only accept API keys. You then drive that interactive Claude Code from anywhere over the network.
 
 What you get:
 
 - a sandboxed Linux box preloaded with the languages, tools, and Claude Code itself;
-- one or many virtual-TTY sessions running inside it, each one a live Claude Code conversation in bypass-permission mode (the container is the sandbox, so per-tool prompts are unnecessary friction);
-- structured event streaming: text deltas, tool calls, todo updates, token usage, status changes, stop reasons, model metadata, all available as JSON frames over WebSocket or SSE;
-- session lifecycle controls from the web UI: create, attach, resume, kill, switch models on the fly;
-- two ways to bill Claude: log in with your Anthropic subscription, or paste an API key;
-- a Web UI plus a REST/WebSocket API, both gated by API-key auth;
-- a rich set of transports designed for very different clients, from a phone browser down to an STM32: HTTPS, WebSocket over TLS, HTTP with AES-GCM envelope encryption, SSE, MQTT (planned), each with its own auth and crypto shape;
+- one or many virtual-TTY sessions running inside it, each a live Claude Code conversation in bypass-permission mode (the container is the sandbox, so per-tool prompts are unnecessary friction);
+- a Web UI that surfaces three concurrent views on the same session — raw virtual terminal, web-native structured Claude driver, and an API inspector for developers;
+- structured event streaming: text deltas, tool calls, todo updates, token usage, status changes, stop reasons, model metadata — all available as JSON frames over WebSocket or SSE, never screen-scraped from the TTY;
+- session lifecycle controls: create, attach, resume, kill, switch models on the fly;
+- two ways to bill Claude per session: an Anthropic subscription (via a long-lived OAuth token you mint on your laptop with `claude setup-token`), or an API key;
+- a Web API in multiple wrappings off one port: our native frame schema (REST + WS + SSE + AES envelope), plus planned **Anthropic-compatible** (`/v1/messages`) and **OpenAI-compatible** (`/openai/v1/chat/completions`) adapters so existing SDKs can target the box as a drop-in;
 - a transparent SOCKS5 layer so every outbound packet from inside the box can be rerouted through one upstream proxy without per-tool config;
 - programmable hooks on every lifecycle event;
-- multi-arch images, a headless flavor that drops the UI, and tuning small enough for a Raspberry Pi or N100 mini PC.
+- a single multi-arch image (`linux/amd64`, `linux/arm64`) that boots equally cleanly on x86 servers and Ampere-class arm64 hosts.
 
-The point: stop tying Claude Code to one workstation. Put it on a beefy home server, a cheap VPS, or a single-board computer, then use it from anywhere with the transport that fits the device.
+The point: stop tying Claude Code to one workstation. Put it on a real server you already own, then use it from anywhere with the transport and API shape that fits the client.
 
 ## The ideal workflow
 
 ```
-1.  Pick an environment image: prebuilt or your own custom one.
-2.  Forward the port (8080 by default).
-3.  docker run — the container boots the control plane and waits for auth.
+1.  Pick an environment image: prebuilt :latest or your own custom build on
+    top of it.
+2.  Forward one port (8080 by default).
+3.  docker run — the container boots the control plane on :8080, multiplexing
+    Web UI + REST + WS + SSE + AES envelope on the same port.
 4.  Open the web panel. Authenticate with the master API key minted at boot.
-5.  Choose how to talk to Claude: log in with your claude.ai subscription,
-    or paste an Anthropic API key. The choice is per-session.
+5.  Choose how to bill Claude this session: an Anthropic subscription (paste
+    the long-lived OAuth token you got with `claude setup-token` on your
+    laptop), or an Anthropic API key. The choice is per-session.
 6.  Dashboard shows: live sessions, token consumption, wall-clock work time,
     current model, hook activity.
-7.  Create a new session. You drop into a virtual-TTY pane running Claude Code
-    in bypass-permission mode. Or resume an earlier session from its
-    transcript and pick up exactly where it stopped.
+7.  Create a new session. The panel gives you three concurrent views on it:
+       (a) raw virtual terminal — xterm.js bound to Claude Code's PTY, the
+           native CC TUI as you'd see in iTerm;
+       (b) web-native Claude driver — chat-style transcript + todo sidebar
+           + tool-call timeline + token meter + model picker;
+       (c) API inspector — every frame and every API request/response,
+           devtools-style.
+    You can switch between them or open them side-by-side.
 8.  Talk to Claude. Switch models mid-flight. Watch todos, tool calls, and
-    status update live in side panels rendered from the structured event
-    stream, not just the raw terminal.
+    status update live in the structured panes — they are rendered from a
+    typed event stream, not by screen-scraping the terminal.
 9.  From a phone, tablet, embedded MCU, or another agent, hit the same
-    sessions over the transport that suits the device.
+    sessions over the transport and API shape that suits the client —
+    REST/WS for browsers, AES envelope for an ESP32, Anthropic- or
+    OpenAI-compatible HTTP for off-the-shelf SDKs (planned).
 ```
 
 That is the loop the rest of this README is here to explain.
@@ -68,19 +80,22 @@ That is the loop the rest of this README is here to explain.
 | Capability | Notes |
 |------------|-------|
 | Multi-session | PTY-backed; spawn, attach, detach, kill, list. Multiple clients can attach to the same session simultaneously. |
-| Bypass-permission mode | Default. Claude Code runs with `--dangerously-skip-permissions` because the container is the security boundary, not the per-tool prompt. Can be turned off per session. |
-| Resume | Every session keeps an append-only `transcript.jsonl`. `POST /api/sessions { resume: <session_id> }` brings it back with full history. |
-| Model switching | `POST /api/sessions/:id/model { model }` switches mid-flight, e.g. `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`. |
-| Input simulation | `POST /api/sessions/:id/input` writes raw bytes (or text frames) into the session's stdin. The same primitive backs both human typing and automation. |
+| Interactive REPL only | Claude Code is run in its full interactive mode, never with `--print`. This is mandatory for subscription-quota billing and is what powers the structured event stream via hooks. |
+| Bypass-permission mode | Default. Claude Code runs with `--dangerously-skip-permissions` because the container is the security boundary, not the per-tool prompt. Can be turned off per session; hook `PermissionRequest` events still fire and can re-authoritate. |
+| Resume | Sessions are CC's own — transcript lives at `~/.claude/projects/<hash>/<session>.jsonl`. `POST /api/sessions { resume: <session_id> }` re-spawns with `--resume`. |
+| Model switching | `POST /api/sessions/:id/model { model }` sends `/model <name>` into the PTY mid-session and emits a `meta` frame. |
+| Input simulation | `POST /api/sessions/:id/input` writes raw bytes (or text frames) into the session's stdin. Same primitive backs both human typing and automation. |
 | Detached / headless | Sessions survive client disconnects. Reconnect with `?from=<seq>` to replay missed frames. |
 
 ### Claude authentication (per session)
 
 | Mode | When to use | How |
 |------|-------------|-----|
-| Anthropic subscription | You already pay for Claude.ai Pro/Max and want it billed there. | Web UI guides you through the standard `claude login` flow inside the container. Credentials live in `~/.claude/` on a mounted volume. |
-| API key | Programmatic, CI, multi-user, or paying per token. | Paste `sk-ant-...` in the UI or set `ANTHROPIC_API_KEY` on the container. |
-| Mixed | Two sessions, two billing modes. | Each session declares its own auth mode at create time. |
+| Anthropic subscription (default for personal use) | You already pay for Claude Pro / Max and want it billed there. | On your laptop, run `claude setup-token` to mint a long-lived OAuth token. Pass it as `CLAUDE_CODE_OAUTH_TOKEN` to the container, or per-session via the API. |
+| API key | Programmatic, CI, paying per token, or sharing the box across people who all have their own keys. | Set `ANTHROPIC_API_KEY` on the container, or per-session via the API. |
+| In-container interactive `claude /login` | Convenience for users who do not want to fuss with `claude setup-token`. | Roadmap (M3). Web UI will drive an OAuth callback flow against a PTY-backed `claude /login`. |
+
+Subscription billing only works because CC stays in interactive REPL mode inside the container — see the row above.
 
 ### Structured event stream
 
@@ -105,22 +120,25 @@ Clients pick which frames they care about: a phone dashboard probably wants `tod
 
 ### Hooks
 
-Hooks are first-class. User scripts fire on every lifecycle event listed in the table above and can rewrite, block, or annotate. Hook config is merged from image-level (`/etc/claude-in-box/hooks.json`), user-level (`~/.claude/hooks.json`), and per-session declarations.
+Hooks are first-class. The control plane installs its own `http`-type hooks at session start (HMAC-signed, pointed at an internal route) so it can capture every lifecycle event authoritatively. User-supplied hooks compose on top, merged from image-level (`/etc/claude-in-box/hooks.json`), user-level (`~/.claude/hooks.json`), and per-session declarations. Hooks can rewrite, block, inject context, or annotate; results land on the frame bus as `hook` frames.
 
-### Web API and transports
+### Web API: one port, many wrappings
 
-Each capability ships across multiple transports so that very different devices can use the same backend. Pick the one that fits the device.
+The container exposes exactly one TCP port. Everything is multiplexed onto it through HTTP routing. Each capability is wrapped in multiple shapes so very different clients can use the same backend with the format they prefer.
 
-| Transport | Best for | Crypto | Auth | Streaming | Status |
-|-----------|----------|--------|------|-----------|--------|
-| HTTPS / WSS | Browser, phone, server | TLS | Bearer token | yes (WSS) | planned, first target |
-| HTTP + AES envelope | Bare-metal MCU (ESP32, STM32), no TLS stack | AES-256-GCM per-device key | API key + per-request nonce | request/response only | planned |
-| SSE | Cheap one-way clients, log tailers | TLS or AES envelope | Bearer / API key | yes (one-way) | planned |
-| WebSocket (no TLS) over private LAN | Trusted LAN clients, dev | optional AES envelope | Bearer | yes | planned |
-| MQTT bridge | IoT bus integrations | TLS or pre-shared | per topic | yes | roadmap |
-| Raw TCP framed | Absolute minimum footprint | AES-GCM | API key | yes | roadmap |
+| Wrapping | Path prefix | Best for | Crypto | Auth | Status |
+|----------|-------------|----------|--------|------|--------|
+| Native frame REST + WS | `/api/*`, `/ws/*` | Browser, phone, server, our Web UI | TLS via nginx | Bearer token (master or device-scoped) | M1 |
+| Native frame SSE | `/sse/*` | Cheap one-way clients, log tailers | TLS via nginx | Bearer | M1 |
+| HTTP + AES envelope | `/aes/*` | Bare-metal MCU (ESP32, STM32), no TLS stack | AES-256-GCM per-device key | API key + per-request nonce | M1 |
+| Anthropic-compatible API | `/v1/messages`, `/v1/messages?stream=true` | Existing Claude SDK clients — point base URL at the box, get subscription-backed Claude | TLS via nginx | Bearer / API key | M3 (planned) |
+| OpenAI-compatible API | `/openai/v1/chat/completions` | Existing OpenAI SDK clients | TLS via nginx | Bearer / API key | M3 (planned) |
+| MQTT bridge | — | IoT bus integrations | TLS or pre-shared | Per topic | Roadmap |
+| Raw TCP framed | — | Absolute minimum footprint | AES-GCM | API key | Roadmap |
 
-For HTTPS deployments we ship an [nginx template](deploy/nginx.conf.template) that terminates TLS, proxies the REST surface, upgrades WebSocket connections, and forwards client IPs.
+The Anthropic- and OpenAI-compatible adapters are **format adapters over the same session bus**, not parallel runtimes. They let any tool that already speaks those APIs route through the box and pick up subscription-backed Claude.
+
+For HTTPS deployments we ship an [nginx template](deploy/nginx.conf.template) that terminates TLS, proxies the REST surface, upgrades WebSocket connections, holds SSE open, and forwards client IPs.
 
 For the embedded HTTP transport we ship a small protocol spec, [`docs/AES-TRANSPORT.md`](docs/AES-TRANSPORT.md), so device firmware authors can implement it in a few hundred lines with any AES-GCM library.
 
@@ -135,16 +153,17 @@ For the embedded HTTP transport we ship a small protocol spec, [`docs/AES-TRANSP
 
 Set `CIB_PROXY_URL=socks5://user:pass@host:port` once at boot and every outbound TCP (and UDP through `tun2socks` where supported) from inside the box is redirected through that proxy. Claude API calls, `npm install`, `pip install`, `apt`, `git push` — all of it, with no per-app config. Implemented via `redsocks` plus `nftables`.
 
-### Embedded support
+### Embedded clients (not the server)
 
-- Multi-arch images: `linux/amd64`, `linux/arm64`, `linux/arm/v7`.
-- Headless flavor (`:latest-headless`) drops the Web UI bundle, smaller by roughly 140 MB. Only the REST and WebSocket API are exposed.
-- Default base is Debian-slim; the headless variant skips bundled language runtimes so the image stays compact.
-- Memory and CPU accounting per session, exposed via the API, so an admin running on a 4 GB SBC can see what is eating the box.
+The server side is intentionally **not** sized for embedded hosts — running CC in interactive mode against subscription quota wants a real machine. What is embedded-friendly is the **client** side:
+
+- The AES envelope HTTP transport is designed so an ESP32 / STM32 / RP2040 with only an HTTP client and an AES-GCM implementation can be a first-class participant: send input to a session, poll for structured frames, react to todos / stop events.
+- A reference C client lives at [`clients/c/`](clients/) (mbedtls-based, ~300 LOC), with a sibling ESP-IDF example.
+- Rust and Python reference clients follow in M3.
 
 ## Status
 
-Very early. The repository currently holds the project name, logo, architecture sketch, nginx template, and the AES envelope protocol spec. Implementation is in progress. Star or watch if you want to follow along.
+Very early. The repository currently holds the project name, logo, architecture sketch, nginx template, and the AES envelope protocol spec. Implementation is in progress under the milestones below. Star or watch to follow along.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the planned shape of the system in more depth.
 
@@ -153,20 +172,19 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the planned shape of the 
 ```
                                                        ┌────────────────────────────────────────────┐
                                                        │            claude-in-box container          │
-                                                       │                                            │
-   Browser / phone / iPad   ── HTTPS / WSS ─────────▶  │  ┌────────────┐    ┌──────────────────┐    │
-   Server / CI / agent      ── HTTPS ────────────────▶ │  │  control   │◀──▶│ session manager  │──┐ │
-   ESP32 / STM32 / MCU      ── HTTP + AES envelope ──▶ │  │   plane    │    │  (pty-backed,    │  │ │
-   Watchdog / dashboard     ── SSE ──────────────────▶ │  │  (rest +   │    │   bypass-perm,   │  │ │
-   IoT bus                  ── MQTT (planned) ──────▶  │  │   ws +     │    │   resumable)     │  │ │
-                                                       │  │   sse +    │    └──────────────────┘  │ │
-                                                       │  │   aes ep)  │            ▲             ▼ │
-                                                       │  │            │            │     ┌──────────┐
-                                                       │  │  + auth    │            └────▶│  hooks   │
-                                                       │  │  layer     │  ws stream        │  runtime │
-                                                       │  └────────────┘                   └──────────┘
-                                                       │        ▲                                │   │
-                                                       │        │  structured frames             │   │
+                                                       │            (real server only)               │
+   Browser / phone / iPad   ── /api  /ws  /sse  ───▶   │  ┌────────────┐    ┌──────────────────┐    │
+   Server / CI / agent      ── /api  /ws  /sse  ───▶   │  │  control   │◀──▶│ session manager  │──┐ │
+   Existing Claude SDK      ── /v1/messages*    ───▶   │  │   plane    │    │  (PTY-backed,    │  │ │
+   Existing OpenAI SDK      ── /openai/v1/chat* ───▶   │  │  (single   │    │   interactive,   │  │ │
+   ESP32 / STM32 / MCU      ── /aes/...          ───▶  │  │   :8080,   │    │   bypass-perm,   │  │ │
+   Watchdog / dashboard     ── /sse              ───▶  │  │   multi-   │    │   resumable)     │  │ │
+                                                       │  │   wrapped) │    └──────────────────┘  │ │
+                                                       │  │            │            ▲             ▼ │
+                                                       │  │  + auth    │            │     ┌──────────┐
+                                                       │  └────────────┘            └────▶│  hooks   │
+                                                       │        ▲                          │  runtime │
+                                                       │        │  structured frames       └──────────┘
                                                        │        │  text.delta / tool.use         │   │
                                                        │        │  todo.update / usage           │   │
                                                        │        │  status / stop / meta          │   │
@@ -181,6 +199,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the planned shape of the 
                                                        │   Claude Code  ◀── pty ──  session 1       │
                                                        │                ▲                            │
                                                        │                │  Anthropic subscription    │
+                                                       │                │  (OAuth long token)        │
                                                        │                │       or API key           │
                                                        │     ┌──────────┴────────┐                  │
                                                        │     │ transparent socks5│  ◀── optional    │
@@ -195,7 +214,9 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the planned shape of the 
 # placeholder command shape; container does not exist yet.
 docker run -d --name claude-box \
   -p 8080:8080 \
+  --cap-add NET_ADMIN \
   -e CIB_AUTH_TOKEN=$(openssl rand -hex 32) \
+  -e CLAUDE_CODE_OAUTH_TOKEN=cclo_...      # from `claude setup-token` on your laptop
   -e CIB_PROXY_URL=socks5://user:pass@proxy.example:1080 \
   -v $(pwd)/workspace:/workspace \
   -v $(pwd)/sessions:/var/lib/claude-in-box/sessions \
@@ -205,15 +226,14 @@ docker run -d --name claude-box \
 open http://localhost:8080
 ```
 
-Headless flavor for embedded hosts:
+API-only mode (no Web UI served on `/`, only `/api/*` `/ws/*` `/sse/*` `/aes/*`) — same image, just a runtime mode:
 
 ```bash
 docker run -d --restart unless-stopped \
-  --memory=2g --cpus=2 \
   -p 8080:8080 \
   -e CIB_MODE=headless \
   -e CIB_AUTH_TOKEN=... \
-  ghcr.io/jiangmuran/claude-in-box:latest-headless
+  ghcr.io/jiangmuran/claude-in-box:latest
 ```
 
 Behind HTTPS via nginx: see [`deploy/nginx.conf.template`](deploy/nginx.conf.template).
@@ -222,26 +242,40 @@ Implementing the AES envelope on a microcontroller: see [`docs/AES-TRANSPORT.md`
 
 ## Roadmap
 
-- [ ] Base Docker image (Debian-slim + Node + Python + Go + Claude Code), multi-arch
-- [ ] Session manager: spawn, attach, detach, kill, resume, PTY-backed, bypass-permission default
-- [ ] Mid-session model switching
-- [ ] Hooks runtime with image, user, and session-level merge
-- [ ] Structured event stream (frames as tabled above)
-- [ ] Web API: bearer token, device tokens, scopes, OIDC (later)
-- [ ] WebSocket and SSE streaming with `?from=<seq>` resumption
-- [ ] AES envelope HTTP transport for embedded clients
-- [ ] MQTT and raw-TCP framed transports
-- [ ] Web UI: terminal pane, side panels for todos / tool calls / usage / status, model picker, hook editor, mobile-responsive
-- [ ] Subscription login flow inside the container
+**M1 — headless backend, complete:**
+
+- [ ] Base Docker image (Debian-slim + Node + Python + Go + Rust + claude-code), single tag, multi-arch (amd64 + arm64)
+- [ ] Session manager: spawn, attach, detach, kill, resume, PTY-backed, bypass-permission default, interactive CC only
+- [ ] Mid-session model switching via `/model`
+- [ ] Hooks runtime: image / user / session-level merge, control-plane http hooks installed per session
+- [ ] Structured event stream (frame schema as tabled above)
+- [ ] Web API: bearer token, device tokens, scopes
+- [ ] REST + WS + SSE multiplexed on one port, `?from=<seq>` resumption
+- [ ] AES envelope HTTP transport for embedded clients (`/aes/*`)
 - [ ] Transparent SOCKS5 via redsocks plus nftables
-- [ ] Headless flavor, multi-arch CI build
-- [ ] Persistent sessions across container restarts
-- [ ] Per-session resource accounting
-- [ ] Multi-user / multi-tenant mode
+- [ ] `CIB_MODE=headless` runtime switch for API-only deployments
+- [ ] Multi-arch CI build to GHCR
+- [ ] C reference client and ESP32-IDF demo
+
+**M2 — Web UI:**
+
+- [ ] Three concurrent views per session (raw terminal, web Claude driver, API inspector)
+- [ ] Session sidebar, model picker, hook editor, MCP server config CRUD
+- [ ] Mobile-responsive layout
+
+**M3 — format adapters and auth stretch:**
+
+- [ ] Anthropic-compatible API (`/v1/messages`, streaming)
+- [ ] OpenAI-compatible API (`/openai/v1/chat/completions`)
+- [ ] In-container interactive `claude /login` OAuth flow
+- [ ] Multi-tenant `~/.claude` isolation per device-token-owner
+- [ ] OIDC via reverse-proxy header trust
+- [ ] MQTT bridge, raw-TCP framed transport
+- [ ] Rust and Python reference clients for AES envelope
 
 ## Contributing
 
-Not yet open for contributions; the design is still settling. Open an issue if something resonates or if you have a target device with constraints we should keep in mind.
+Not yet open for contributions; the design is still settling. Open an issue if something resonates or if you have a target client device with constraints we should keep in mind.
 
 ## License
 

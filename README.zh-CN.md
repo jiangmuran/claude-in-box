@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.png" alt="claude-in-box —— 把 Claude Code 装进盒子带走" width="800">
+  <img src="assets/banner.png" alt="claude-in-box —— 把 Claude Code 装进盒子,跑在真服务器上,任何设备都能连过来用" width="800">
 </p>
 
 <p align="center">
@@ -7,55 +7,63 @@
 </p>
 
 <p align="center">
-  <em>把 Claude Code 装进一个容器,Web 管理,任何设备都能连过来用 —— 包括树莓派,甚至单片机。</em>
+  <em>在一台真服务器上跑 Claude Code,通过一个 Web 端口被浏览器、手机、IoT 板、甚至单片机驱动。</em>
 </p>
 
 <p align="center">
   <a href="#%E7%8A%B6%E6%80%81"><img src="https://img.shields.io/badge/status-early%20WIP-orange" alt="状态:早期 WIP"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-D97757" alt="MIT 协议"></a>
   <img src="https://img.shields.io/badge/docker-multi--arch-2496ED?logo=docker&logoColor=white" alt="docker 多架构">
-  <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64%20%7C%20armv7-success" alt="amd64 / arm64 / armv7">
+  <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-success" alt="amd64 / arm64">
 </p>
 
 ---
 
 ## 这是什么
 
-`claude-in-box` 把一整套按需开发环境 + [Claude Code](https://www.anthropic.com/claude-code) 打包进一个 Docker 容器,然后以 Web 服务的形式对外暴露。
+`claude-in-box` 把一整套按需开发环境 + [Claude Code](https://www.anthropic.com/claude-code) 打包进一个 Docker 容器,通过**一个端口**对外暴露为 Web 服务。
+
+你把它跑在一台真服务器上(云主机、独立服务器、家用大机)。容器里的 Claude Code **必须以完整的 interactive REPL 模式运行**—— 这是硬约束,因为只有 interactive 模式才会消耗 Anthropic 订阅配额;`--print` / 无头调用只接受 API key。然后你通过网络从任何地方驱动这个 interactive Claude Code。
 
 你能得到:
 
 - 一个沙箱化的 Linux 盒子,预装常用语言、工具链和 Claude Code 本体;
-- 在虚拟 TTY 里运行的一个或多个会话,默认以 bypass-permission 模式跑(容器本身就是边界,逐工具弹权限只会成为噪音);
-- 结构化事件流:文本增量、工具调用、todo 更新、token 用量、状态变化、停止原因、模型元数据,统一以 JSON 帧通过 WebSocket / SSE 推出;
-- Web UI 提供会话生命周期管理:新建、attach、resume、kill、运行中切模型;
-- 两种 Claude 计费方式:订阅账号登录,或粘贴 API key;
-- Web UI + REST/WebSocket API,都走 API key 鉴权;
-- 面向差异化客户端的多套传输方案:HTTPS、WSS、HTTP + AES-GCM 信封加密、SSE、MQTT(规划中),各自配独立的鉴权与加密形态,目标是从手机浏览器一路覆盖到 STM32;
-- 透明 SOCKS5 层:所有出站流量经一个上游代理重定向,无需逐工具配置;
+- 在虚拟 TTY 里运行的一个或多个会话,默认 bypass-permission 模式(容器本身就是边界,逐工具弹权限只会成为噪音);
+- 一个 Web UI,对同一个会话提供**三种并行视图** —— 原生虚拟终端、网页化的结构化 Claude 驱动、面向开发者的 API 检视器;
+- 结构化事件流:文本增量、工具调用、todo 更新、token 用量、状态变化、停止原因、模型元数据,全部以 JSON 帧通过 WebSocket / SSE 推出,**绝不靠刮 TTY**;
+- 会话生命周期:新建、attach、resume、kill、运行中切模型;
+- 每个会话独立选择计费方式:Anthropic 订阅(在自己电脑上 `claude setup-token` 拿到长 token),或者 API key;
+- 同一个端口上多种封装的 Web API:我们自己的帧 schema(REST + WS + SSE + AES 信封),以及计划中的 **Anthropic 兼容**(`/v1/messages`)和 **OpenAI 兼容**(`/openai/v1/chat/completions`)适配器,让已有 SDK 把 base URL 指过来就能用;
+- 透明 SOCKS5 层,容器内所有出站流量经一个上游代理重定向,无需逐工具配置;
 - 可编程 hooks,在所有生命周期事件触发;
-- 多架构镜像 + 砍掉 UI 的 headless 版本,小到可以塞进树莓派或 N100 软路由。
+- 单一多架构镜像(`linux/amd64`、`linux/arm64`),在 x86 与 Ampere 类 arm64 主机上都能直接跑。
 
-简单说:别再把 Claude Code 锁死在一台开发机上。让它跑在家庭服务器、便宜 VPS,甚至板载机上,然后从任何设备用合适的协议连过来。
+简单说:别再把 Claude Code 锁死在一台开发机上。让它跑在你早就有的真服务器上,然后从任何设备用合适的协议与 API 形态连过去。
 
 ## 理想工作流
 
 ```
-1.  选一个开发环境镜像:预制的,或者你自己定制的。
-2.  做端口转发(默认 8080)。
-3.  docker run —— 容器拉起控制面,等待鉴权。
+1.  选一个开发环境镜像:预制的 :latest,或者基于它的自定义版本。
+2.  做一个端口转发(默认 8080)。
+3.  docker run —— 容器在 :8080 上拉起控制面,把 Web UI + REST + WS +
+    SSE + AES 信封全部多路复用到同一个端口。
 4.  打开 Web 面板,用启动时生成的主 API key 登入。
-5.  选择如何与 Claude 通信:用你的 claude.ai 订阅账号登录,
-    或粘贴 Anthropic API key。每个会话各自独立选择。
-6.  仪表盘可见:活跃会话、token 消耗、累计工作时间、
-    当前模型、hook 活动。
-7.  新建会话 —— 直接进入一个跑着 Claude Code (bypass-permission)
-    的虚拟 TTY 面板。也可以从历史 transcript 里 resume,
-    接着上次停下的位置继续。
-8.  与 Claude 对话,中途随时切模型;todo、工具调用、状态
-    都从结构化事件流中渲染到侧栏,而不仅仅是终端原始输出。
-9.  手机、平板、嵌入式 MCU 或别的 agent,可以走与设备匹配
-    的传输协议,连同一份会话。
+5.  选择本次会话怎么计费:Anthropic 订阅(粘贴你在自己电脑上
+    `claude setup-token` 拿到的长 OAuth token),或者 Anthropic API key。
+    每个会话各自独立选择。
+6.  仪表盘可见:活跃会话、token 消耗、累计工作时间、当前模型、hook 活动。
+7.  新建会话。面板对同一会话提供三种并行视图:
+       (a) 原生虚拟终端 —— xterm.js 绑定到 Claude Code 的 PTY,就是
+           你在 iTerm 里看到的 CC TUI;
+       (b) 网页化 Claude 驱动 —— chat 风格 transcript + todo 侧栏 +
+           工具调用时间线 + token 仪表 + 模型选择器;
+       (c) API 检视器 —— 所有帧、所有 API 请求/响应,devtools 风格。
+    可以切换、也可以并排。
+8.  与 Claude 对话;中途随时切模型;todo、工具调用、状态从类型化事件流
+    实时渲染到结构化视图里,而不是刮终端。
+9.  手机、平板、嵌入式 MCU 或别的 agent 都能连同一个会话,各自挑合适的
+    传输 + API 形态 —— 浏览器走 REST/WS,ESP32 走 AES 信封,现成 SDK 走
+    Anthropic / OpenAI 兼容 HTTP(规划中)。
 ```
 
 这就是 README 后面这些章节要讲清楚的整个闭环。
@@ -67,9 +75,10 @@
 | 能力 | 说明 |
 |------|------|
 | 多会话 | PTY 驱动;spawn / attach / detach / kill / list。多个客户端可以同时 attach 同一个会话。 |
-| Bypass-permission 模式 | 默认开启。Claude Code 以 `--dangerously-skip-permissions` 启动,因为容器才是安全边界,逐工具弹窗反而是干扰。可按会话关闭。 |
-| Resume | 每个会话有 append-only `transcript.jsonl`。`POST /api/sessions { resume: <id> }` 即可带完整历史重启。 |
-| 模型切换 | `POST /api/sessions/:id/model { model }`,运行中切换,例如 `claude-opus-4-7`、`claude-sonnet-4-6`、`claude-haiku-4-5-20251001`。 |
+| 只跑 interactive REPL | Claude Code 永远以完整的 interactive 模式运行,**不会**用 `--print`。这是订阅配额计费的硬要求,也是结构化事件流(通过 hooks)的前提。 |
+| Bypass-permission 模式 | 默认开启。Claude Code 以 `--dangerously-skip-permissions` 启动,因为容器才是安全边界,逐工具弹窗反而是干扰。可按会话关闭;hook `PermissionRequest` 事件仍会触发,可以二次拦截。 |
+| Resume | 会话是 CC 自己的 —— transcript 在 `~/.claude/projects/<hash>/<session>.jsonl`。`POST /api/sessions { resume: <id> }` 用 `--resume` 重启即可。 |
+| 模型切换 | `POST /api/sessions/:id/model { model }`,运行中往 PTY 注入 `/model <name>`,并 emit 一个 `meta` 帧。 |
 | 输入模拟 | `POST /api/sessions/:id/input` 直接往会话 stdin 写字节(或文本帧)。人输入和自动化共用同一原语。 |
 | 断线/无头 | 会话不依赖客户端连接;重连带 `?from=<seq>` 即可补齐丢失帧。 |
 
@@ -77,9 +86,11 @@
 
 | 模式 | 适用场景 | 方式 |
 |------|----------|------|
-| Anthropic 订阅 | 已经付了 Claude.ai Pro / Max,想走订阅。 | Web UI 引导你在容器内完成标准 `claude login` 流程,凭证存放在挂载卷的 `~/.claude/`。 |
-| API key | 程序化、CI、多用户、按 token 计费。 | UI 粘贴 `sk-ant-...` 或容器启动时给 `ANTHROPIC_API_KEY`。 |
-| 混用 | 两个会话两种计费。 | 创建会话时各自声明鉴权模式。 |
+| Anthropic 订阅(个人用户默认) | 已经付了 Claude Pro / Max,想走订阅。 | 在你自己电脑上跑 `claude setup-token` 拿到长 OAuth token;通过 `CLAUDE_CODE_OAUTH_TOKEN` env 或者 API 按会话注入容器。 |
+| API key | 程序化、CI、按 token 计费,或者一台 box 给多个人各自带 key。 | 容器上设 `ANTHROPIC_API_KEY`,或按会话注入。 |
+| 容器内 `claude /login` 交互登录 | 给不想折腾 `claude setup-token` 的用户。 | Roadmap (M3)。Web UI 会驱动一个 PTY 化的 `claude /login` + OAuth 回调流。 |
+
+订阅计费能跑通,前提是 CC 在容器里保持 interactive REPL —— 见上一张表的对应条目。
 
 ### 结构化事件流
 
@@ -104,24 +115,27 @@
 
 ### Hooks
 
-Hooks 是一等公民。用户脚本可在上表所列任意生命周期事件触发,可改写、阻断、注解。配置按"镜像级 (`/etc/claude-in-box/hooks.json`) → 用户级 (`~/.claude/hooks.json`) → 会话级"合并。
+Hooks 是一等公民。控制面在每个会话启动时安装自己的 `http` 类型 hook(HMAC 签名,指向内部路由),从而权威地捕获每个生命周期事件。用户 hook 在此之上合并:镜像级(`/etc/claude-in-box/hooks.json`)、用户级(`~/.claude/hooks.json`)、会话级声明。Hook 可改写、阻断、注入上下文或标注;结果以 `hook` 帧落到帧总线。
 
-### Web API 与传输协议
+### Web API:一个端口,多种封装
 
-每种能力都跨多种传输实现,让差异极大的客户端能共用同一后端。按设备选合适的。
+容器只暴露一个 TCP 端口。所有能力通过 HTTP 路由多路复用到这一个端口上。同一能力还提供多种封装,让差异极大的客户端能各自挑顺眼的形态。
 
-| 传输 | 适用客户端 | 加密 | 鉴权 | 流式 | 状态 |
-|------|------------|------|------|------|------|
-| HTTPS / WSS | 浏览器、手机、服务器 | TLS | Bearer token | 是 (WSS) | 规划中,首期目标 |
-| HTTP + AES 信封 | 没 TLS 栈的裸机 MCU (ESP32 / STM32) | AES-256-GCM 设备级密钥 | API key + 单请求 nonce | 仅请求/响应 | 规划中 |
-| SSE | 廉价的单向客户端、日志拉取 | TLS 或 AES 信封 | Bearer / API key | 是(单向) | 规划中 |
-| WebSocket(无 TLS,内网) | 受信内网客户端、开发 | 可选 AES 信封 | Bearer | 是 | 规划中 |
-| MQTT 桥 | IoT 总线接入 | TLS 或预共享 | 按主题 | 是 | Roadmap |
-| 原始 TCP 帧 | 最小占用极限场景 | AES-GCM | API key | 是 | Roadmap |
+| 封装 | 路径前缀 | 适用客户端 | 加密 | 鉴权 | 状态 |
+|------|----------|------------|------|------|------|
+| 原生帧 REST + WS | `/api/*`、`/ws/*` | 浏览器、手机、服务器、我们自己的 Web UI | TLS(nginx 终止) | Bearer token(主/设备级) | M1 |
+| 原生帧 SSE | `/sse/*` | 廉价单向客户端、日志拉取 | TLS(nginx 终止) | Bearer | M1 |
+| HTTP + AES 信封 | `/aes/*` | 没 TLS 栈的裸机 MCU(ESP32 / STM32) | AES-256-GCM 设备级密钥 | API key + 单请求 nonce | M1 |
+| Anthropic 兼容 API | `/v1/messages`、`/v1/messages?stream=true` | 已有 Claude SDK 客户端 —— base URL 指过来就能用 | TLS(nginx 终止) | Bearer / API key | M3(规划) |
+| OpenAI 兼容 API | `/openai/v1/chat/completions` | 已有 OpenAI SDK 客户端 | TLS(nginx 终止) | Bearer / API key | M3(规划) |
+| MQTT 桥 | — | IoT 总线接入 | TLS 或预共享 | 按主题 | Roadmap |
+| 原始 TCP 帧 | — | 最小占用极限场景 | AES-GCM | API key | Roadmap |
 
-HTTPS 部署提供 [nginx 配置模板](deploy/nginx.conf.template):终止 TLS、反代 REST、升级 WebSocket、转发客户端 IP。
+Anthropic / OpenAI 兼容适配器是**同一会话总线上的格式适配器**,而不是平行的运行时。它们让已经会说这些 API 的工具把请求路过来,直接用上订阅配额支撑的 Claude。
 
-嵌入式 HTTP 传输提供一份[`docs/AES-TRANSPORT.md`](docs/AES-TRANSPORT.md)协议规范,固件开发者用任一 AES-GCM 库,几百行就能跑起来。
+HTTPS 部署提供 [nginx 配置模板](deploy/nginx.conf.template):终止 TLS、反代 REST、升级 WebSocket、放行 SSE 长连、转发客户端 IP。
+
+嵌入式 HTTP 传输提供一份 [`docs/AES-TRANSPORT.md`](docs/AES-TRANSPORT.md) 协议规范,固件开发者用任一 AES-GCM 库,几百行就能跑起来。
 
 ### 控制面鉴权
 
@@ -134,16 +148,17 @@ HTTPS 部署提供 [nginx 配置模板](deploy/nginx.conf.template):终止 TLS�
 
 启动时给 `CIB_PROXY_URL=socks5://user:pass@host:port`,容器里所有出站 TCP(以及 `tun2socks` 支持的 UDP)统统走该上游代理。Claude API、`npm install`、`pip install`、`apt`、`git push` —— 全都自动走代理,且无需在任何工具里改配置。底层用 `redsocks` + `nftables`。
 
-### 嵌入式支持
+### 嵌入式客户端(不是服务端)
 
-- 多架构镜像:`linux/amd64`、`linux/arm64`、`linux/arm/v7`。
-- Headless 版本(`:latest-headless`)砍掉 Web UI bundle,镜像小约 140 MB,只暴露 REST 与 WebSocket API。
-- 默认基底是 Debian-slim;headless 版本进一步不预装语言运行时,保持镜像紧凑。
-- 每会话内存/CPU 计量通过 API 暴露,4 GB 的小盒子上也能看清"谁吃资源"。
+服务端这边**不**针对嵌入式宿主缩水 —— interactive Claude Code 跑订阅配额需要一台真机器。真正"嵌入式友好"的是**客户端**这一头:
+
+- AES 信封 HTTP 传输让一台只有 HTTP client + AES-GCM 实现的 ESP32 / STM32 / RP2040 也能当一等公民:给会话发输入、轮询结构化帧、对 todo/stop 做出反应。
+- 参考 C 客户端放在 [`clients/c/`](clients/)(mbedtls,~300 LOC),旁边附带一个 ESP-IDF 例子。
+- Rust / Python 参考客户端在 M3 跟上。
 
 ## 状态
 
-非常早期。目前仓库里有项目名、logo、架构草图、nginx 模板和 AES 信封协议规范。实现进行中。想跟进可以 Star/Watch。
+非常早期。目前仓库里有项目名、logo、架构草图、nginx 模板和 AES 信封协议规范。实现按下方里程碑推进。想跟进可以 Star/Watch。
 
 详细设计见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
@@ -152,19 +167,19 @@ HTTPS 部署提供 [nginx 配置模板](deploy/nginx.conf.template):终止 TLS�
 ```
                                                        ┌────────────────────────────────────────────┐
                                                        │            claude-in-box 容器               │
-                                                       │                                            │
-   浏览器 / 手机 / iPad     ── HTTPS / WSS ─────────▶  │  ┌────────────┐    ┌──────────────────┐    │
-   服务器 / CI / agent      ── HTTPS ────────────────▶ │  │  控制面    │◀──▶│ session manager  │──┐ │
-   ESP32 / STM32 / MCU      ── HTTP + AES 信封 ──────▶ │  │ (REST +    │    │ (PTY 驱动,bypass │  │ │
-   看门狗 / 仪表盘          ── SSE ──────────────────▶ │  │  WS +      │    │  permission,可   │  │ │
-   IoT 总线                 ── MQTT (规划中) ────────▶ │  │  SSE +     │    │  resume)         │  │ │
-                                                       │  │  AES ep)   │    └──────────────────┘  │ │
-                                                       │  │            │            ▲             ▼ │
-                                                       │  │ + 鉴权层   │            │     ┌──────────┐
-                                                       │  └────────────┘            └────▶│  hooks   │
-                                                       │        ▲                          │ runtime  │
-                                                       │        │  结构化帧                └──────────┘
-                                                       │        │  text.delta / tool.use         │   │
+                                                       │            (只跑在真服务器上)               │
+   浏览器 / 手机 / iPad     ── /api  /ws  /sse  ───▶   │  ┌────────────┐    ┌──────────────────┐    │
+   服务器 / CI / agent      ── /api  /ws  /sse  ───▶   │  │  控制面    │◀──▶│ session manager  │──┐ │
+   已有 Claude SDK          ── /v1/messages*    ───▶   │  │ (单端口    │    │   (PTY 驱动,     │  │ │
+   已有 OpenAI SDK          ── /openai/v1/chat* ───▶   │  │  :8080,    │    │   interactive,   │  │ │
+   ESP32 / STM32 / MCU      ── /aes/...         ───▶   │  │   多形态   │    │   bypass-perm,   │  │ │
+   看门狗 / 仪表盘          ── /sse             ───▶   │  │   封装)    │    │   可 resume)     │  │ │
+                                                       │  │ + 鉴权层   │    └──────────────────┘  │ │
+                                                       │  └────────────┘            ▲             ▼ │
+                                                       │        ▲                   │     ┌──────────┐
+                                                       │        │                   └────▶│  hooks   │
+                                                       │        │  结构化帧               │ runtime  │
+                                                       │        │  text.delta / tool.use  └──────────┘
                                                        │        │  todo.update / usage           │   │
                                                        │        │  status / stop / meta          │   │
                                                        │        │                                │   │
@@ -178,7 +193,8 @@ HTTPS 部署提供 [nginx 配置模板](deploy/nginx.conf.template):终止 TLS�
                                                        │   Claude Code  ◀── pty ──  会话 1          │
                                                        │                ▲                            │
                                                        │                │  Anthropic 订阅            │
-                                                       │                │       或 API key           │
+                                                       │                │  (OAuth 长 token)          │
+                                                       │                │     或 API key             │
                                                        │     ┌──────────┴────────┐                  │
                                                        │     │ 透明 SOCKS5 网关  │  ◀── 可选        │
                                                        │     │ (redsocks + nft)  │      PROXY_URL   │
@@ -192,7 +208,9 @@ HTTPS 部署提供 [nginx 配置模板](deploy/nginx.conf.template):终止 TLS�
 # 待发布,命令形态预览,容器尚未发布。
 docker run -d --name claude-box \
   -p 8080:8080 \
+  --cap-add NET_ADMIN \
   -e CIB_AUTH_TOKEN=$(openssl rand -hex 32) \
+  -e CLAUDE_CODE_OAUTH_TOKEN=cclo_...      # 在你电脑上 `claude setup-token` 拿到
   -e CIB_PROXY_URL=socks5://user:pass@proxy.example:1080 \
   -v $(pwd)/workspace:/workspace \
   -v $(pwd)/sessions:/var/lib/claude-in-box/sessions \
@@ -202,15 +220,14 @@ docker run -d --name claude-box \
 open http://localhost:8080
 ```
 
-嵌入式宿主用 headless 版本:
+API-only 模式(不在 `/` 提供 Web UI,只暴露 `/api/*` `/ws/*` `/sse/*` `/aes/*`)—— 同一个镜像,只是一个 runtime 开关:
 
 ```bash
 docker run -d --restart unless-stopped \
-  --memory=2g --cpus=2 \
   -p 8080:8080 \
   -e CIB_MODE=headless \
   -e CIB_AUTH_TOKEN=... \
-  ghcr.io/jiangmuran/claude-in-box:latest-headless
+  ghcr.io/jiangmuran/claude-in-box:latest
 ```
 
 走 HTTPS / nginx 反代:见 [`deploy/nginx.conf.template`](deploy/nginx.conf.template)。
@@ -219,26 +236,40 @@ docker run -d --restart unless-stopped \
 
 ## Roadmap
 
-- [ ] 基础 Docker 镜像(Debian-slim + Node + Python + Go + Claude Code),多架构
-- [ ] Session manager:spawn / attach / detach / kill / resume,PTY 驱动,默认 bypass-permission
-- [ ] 运行中切换模型
-- [ ] Hooks runtime:镜像 / 用户 / 会话级合并
+**M1 —— 完整无 UI 后端:**
+
+- [ ] 基础 Docker 镜像(Debian-slim + Node + Python + Go + Rust + claude-code),单 tag,多架构(amd64 + arm64)
+- [ ] Session manager:spawn / attach / detach / kill / resume,PTY 驱动,默认 bypass-permission,CC 仅 interactive
+- [ ] 运行中切换模型(`/model`)
+- [ ] Hooks runtime:镜像 / 用户 / 会话级合并,控制面 http hook 按会话注入
 - [ ] 结构化事件流(见上表)
-- [ ] Web API:bearer token、设备级 token、scope、OIDC(后续)
-- [ ] WebSocket 与 SSE 流式输出,`?from=<seq>` 断点续传
-- [ ] 面向嵌入式客户端的 HTTP + AES 信封传输
-- [ ] MQTT 与原始 TCP 帧传输
-- [ ] Web UI:终端面板,todo / 工具调用 / 用量 / 状态侧栏,模型选择器,hook 编辑器,移动端响应式
-- [ ] 容器内订阅登录流
+- [ ] Web API:bearer token、设备级 token、scope
+- [ ] REST + WS + SSE 同一端口多路复用,`?from=<seq>` 断点续传
+- [ ] 嵌入式客户端用的 AES 信封 HTTP 传输(`/aes/*`)
 - [ ] 透明 SOCKS5(redsocks + nftables)
-- [ ] Headless 版本,多架构 CI
-- [ ] 容器重启后会话持久化
-- [ ] 会话级资源计量
-- [ ] 多用户 / 多租户
+- [ ] `CIB_MODE=headless` runtime 开关,只暴露 API
+- [ ] 多架构 CI 推送到 GHCR
+- [ ] C 参考客户端 + ESP32-IDF 示例
+
+**M2 —— Web UI:**
+
+- [ ] 同会话三视图并行(原生终端 / 网页 Claude 驱动 / API 检视器)
+- [ ] 会话侧栏、模型选择器、hook 编辑器、MCP server 配置 CRUD
+- [ ] 移动端响应式
+
+**M3 —— 格式适配器与鉴权延伸:**
+
+- [ ] Anthropic 兼容 API(`/v1/messages`、流式)
+- [ ] OpenAI 兼容 API(`/openai/v1/chat/completions`)
+- [ ] 容器内交互式 `claude /login` OAuth 流
+- [ ] 多用户 `~/.claude` 隔离
+- [ ] OIDC(反代头信任)
+- [ ] MQTT 桥、原始 TCP 帧传输
+- [ ] AES 信封的 Rust / Python 参考客户端
 
 ## 贡献
 
-设计还在收敛,暂未开放外部贡献。如果有目标设备的限制需要考虑,欢迎开 issue 让我们提前对齐。
+设计还在收敛,暂未开放外部贡献。如果有目标客户端设备的限制需要考虑,欢迎开 issue 让我们提前对齐。
 
 ## 协议
 

@@ -39,16 +39,28 @@ type Session struct {
 	ExitCode  int       `json:"exit_code,omitempty"`
 	BaseDir   string    `json:"-"` // sessions/<id>/
 
+	// HookToken is the per-session shared secret used to authenticate hook
+	// callbacks the child process makes back to /internal/hooks/<id>. Never
+	// serialized to disk and not exposed through any public API surface.
+	hookToken string
+
 	cmd    *exec.Cmd
 	pty    *os.File
 	bus    *stream.Bus
 	parser *stream.Parser
 
-	state  atomic.Value // stream.State
-	done   chan struct{}
-	once   sync.Once
-	mu     sync.Mutex
+	state atomic.Value // stream.State
+	done  chan struct{}
+	once  sync.Once
+	mu    sync.Mutex
 }
+
+// Bus returns the session's event bus. Exposed so other packages (e.g. hook
+// receiver wiring) can publish frames without going through Session methods.
+func (s *Session) Bus() *stream.Bus { return s.bus }
+
+// HookToken returns the session's hook callback token.
+func (s *Session) HookToken() string { return s.hookToken }
 
 // State returns the current high-level session state.
 func (s *Session) State() stream.State {

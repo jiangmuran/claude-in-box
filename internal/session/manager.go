@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/google/uuid"
 
+	"github.com/jiangmuran/claude-in-box/internal/hooks"
 	"github.com/jiangmuran/claude-in-box/internal/stream"
 )
 
@@ -21,6 +23,11 @@ import (
 type Manager struct {
 	BaseDir   string // e.g. /var/lib/claude-in-box/sessions
 	ClaudeBin string // path to the `claude` binary; defaults to looking it up on PATH
+
+	// ControlAddr is the host:port the child's hook scripts should curl back
+	// to. Inside the container this is loopback (127.0.0.1:8080 by default).
+	// Empty disables hook installation.
+	ControlAddr string
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -92,9 +99,25 @@ func (m *Manager) Spawn(ctx context.Context, opts SpawnOptions) (*Session, error
 	sess.state.Store(stream.StateStarting)
 	sess.parser = stream.NewParser(sess.bus)
 
+	// Install per-session hooks (writes settings.json under
+	// <session_dir>/.claude/ and sets CLAUDE_CONFIG_DIR for the child).
+	var extraEnv []string
+	if m.ControlAddr != "" {
+		token, err := hooks.NewToken()
+		if err != nil {
+			return nil, fmt.Errorf("spawn: gen hook token: %w", err)
+		}
+		configDir := filepath.Join(dir, ".claude")
+		if _, err := hooks.WriteSessionSettings(configDir, id, token, m.ControlAddr, nil); err != nil {
+			return nil, fmt.Errorf("spawn: write hook settings: %w", err)
+		}
+		sess.hookToken = token
+		extraEnv = append(extraEnv, "CLAUDE_CONFIG_DIR="+configDir)
+	}
+
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = opts.Workdir
-	cmd.Env = m.envFor(opts)
+	cmd.Env = m.envFor(opts, extraEnv...)
 	sess.cmd = cmd
 
 	master, err := pty.Start(cmd)
@@ -240,7 +263,7 @@ func (m *Manager) commandFor(opts SpawnOptions) (string, []string, error) {
 
 // envFor builds the child environment. It preserves the parent's env (so
 // PATH/TERM/etc work) and layers per-session overrides on top.
-func (m *Manager) envFor(opts SpawnOptions) []string {
+func (m *Manager) envFor(opts SpawnOptions, additional ...string) []string {
 	env := os.Environ()
 	overrides := map[string]string{}
 	switch opts.AuthMode {
@@ -260,11 +283,13 @@ func (m *Manager) envFor(opts SpawnOptions) []string {
 		overrides["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 	}
 
-	// Apply overrides + opts.ExtraEnv.
+	// Apply overrides + opts.ExtraEnv + manager-provided additions.
 	env = applyEnv(env, overrides)
-	if len(opts.ExtraEnv) > 0 {
+	allExtras := append([]string{}, opts.ExtraEnv...)
+	allExtras = append(allExtras, additional...)
+	if len(allExtras) > 0 {
 		extra := map[string]string{}
-		for _, kv := range opts.ExtraEnv {
+		for _, kv := range allExtras {
 			for i := 0; i < len(kv); i++ {
 				if kv[i] == '=' {
 					extra[kv[:i]] = kv[i+1:]
@@ -275,6 +300,30 @@ func (m *Manager) envFor(opts SpawnOptions) []string {
 		env = applyEnv(env, extra)
 	}
 	return env
+}
+
+// CheckHookToken implements hooks.Sink. Constant-time comparison.
+func (m *Manager) CheckHookToken(sessionID, provided string) bool {
+	s, ok := m.Get(sessionID)
+	if !ok {
+		return false
+	}
+	return hooks.ConstantTimeEqualString(s.hookToken, provided)
+}
+
+// EmitHookFrame implements hooks.Sink. Publishes a `hook` frame on the
+// session's bus.
+func (m *Manager) EmitHookFrame(sessionID, event string, payload json.RawMessage) error {
+	s, ok := m.Get(sessionID)
+	if !ok {
+		return hooks.ErrUnknownSession
+	}
+	_, err := s.Bus().Publish(stream.KindHook, stream.HookData{
+		Name:    event,
+		Event:   event,
+		Payload: payload,
+	})
+	return err
 }
 
 func applyEnv(env []string, overrides map[string]string) []string {

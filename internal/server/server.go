@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	aespkg "github.com/jiangmuran/claude-in-box/internal/aes"
 	"github.com/jiangmuran/claude-in-box/internal/auth"
 	"github.com/jiangmuran/claude-in-box/internal/clauth"
 	"github.com/jiangmuran/claude-in-box/internal/hooks"
@@ -25,6 +26,7 @@ type Config struct {
 	Sessions   *session.Manager
 	Tokens     auth.Store
 	ClaudeAuth *clauth.Manager // may be nil — handlers return 503 in that case
+	AESReplay  *aespkg.ReplayCache
 
 	// Version, Commit are reported by /api/health and the placeholder index.
 	Version string
@@ -39,6 +41,9 @@ type Server struct {
 
 // New builds a Server with all routes registered.
 func New(cfg Config) *Server {
+	if cfg.AESReplay == nil {
+		cfg.AESReplay = aespkg.NewReplayCache()
+	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux()}
 	s.routes()
 	return s
@@ -88,6 +93,15 @@ func (s *Server) routes() {
 		auth.Require(s.cfg.Tokens, auth.ScopeTokensWrite)(http.HandlerFunc(s.mintToken)))
 	mux.Handle("DELETE /api/tokens/{id}",
 		auth.Require(s.cfg.Tokens, auth.ScopeTokensWrite)(http.HandlerFunc(s.revokeToken)))
+
+	// AES envelope transport (embedded clients). The cleartext bootstrap
+	// endpoints are unauthenticated by design (matches docs/AES-TRANSPORT.md);
+	// every other /aes/* route authenticates through the AES envelope itself
+	// via the per-device key in Sec-CIB-KeyId.
+	mux.HandleFunc("GET /aes/time", s.aesTime)
+	mux.HandleFunc("GET /aes/keyinfo", s.aesKeyInfo)
+	mux.HandleFunc("POST /aes/sessions/{id}/input", s.aesInput)
+	mux.HandleFunc("POST /aes/sessions/{id}/events/poll", s.aesEventsPoll)
 
 	// Claude auth (in-container `claude auth login --claudeai`).
 	mux.Handle("GET /api/auth/claude/status",

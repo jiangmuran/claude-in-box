@@ -29,8 +29,13 @@ type Token struct {
 	Scopes    []string   `json:"scopes"`
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	// Hash is hex(sha256(plaintext)). Never returns plaintext.
+	// Hash is hex(sha256(plaintext bearer)). Never returns the bearer.
 	Hash string `json:"hash"`
+	// AESSecretHex is the optional 32-byte AES-256 master secret for the
+	// device (docs/AES-TRANSPORT.md). Hex-encoded, stored at rest as-is
+	// because it must be retrievable plaintext for AES-GCM decrypt. Empty
+	// when this token was minted with WithAES=false.
+	AESSecretHex string `json:"aes_secret_hex,omitempty"`
 }
 
 // IsExpired returns true if ExpiresAt is set and in the past.
@@ -58,10 +63,20 @@ type PublicToken struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
-// MintResult is what NewToken returns at mint time — Token + the plaintext.
+// MintResult is what NewToken returns at mint time — Token + the plaintext
+// bearer + (optional) the AES master secret.
 type MintResult struct {
-	Token     Token  `json:"token"`
-	Plaintext string `json:"plaintext"` // returned to caller exactly once
+	Token        Token  `json:"token"`
+	Plaintext    string `json:"plaintext"`               // returned to caller exactly once
+	AESSecretHex string `json:"aes_secret_hex,omitempty"` // only present if WithAES was true
+}
+
+// MintOptions controls Mint behaviour.
+type MintOptions struct {
+	// WithAES asks Mint to also generate a 32-byte AES master secret for
+	// the AES envelope transport. Defaults to true; pass false on Store's
+	// Mint variants that take MintOptions.
+	WithAES bool
 }
 
 // Store persists tokens. The default implementation is FileStore.
@@ -71,7 +86,8 @@ type Store interface {
 	// strings of equal length.
 	Lookup(plaintext string) (Token, bool)
 
-	// Mint creates and persists a new token.
+	// Mint creates and persists a new token; an AES secret is generated
+	// alongside the bearer by default.
 	Mint(label string, scopes []string, ttl time.Duration) (MintResult, error)
 
 	// SetMaster registers the master token from the boot env var. Replaces
@@ -83,6 +99,11 @@ type Store interface {
 
 	// Get returns a token by id.
 	Get(id string) (Token, bool)
+
+	// GetAESSecret returns the raw 32-byte AES master secret for the
+	// device whose token id is keyID. Returns (nil, false) if the token
+	// does not exist or has no AES secret on file.
+	GetAESSecret(keyID string) ([]byte, bool)
 
 	// Revoke deletes a token by id. Cannot revoke the master.
 	Revoke(id string) error
@@ -173,7 +194,10 @@ func (s *FileStore) Lookup(plaintext string) (Token, bool) {
 	return Token{}, false
 }
 
-// Mint implements Store.
+// Mint implements Store. An AES master secret is generated alongside the
+// bearer; callers who do not want one can simply ignore AESSecretHex on
+// MintResult and on Token (it remains harmless on disk until the token is
+// revoked).
 func (s *FileStore) Mint(label string, scopes []string, ttl time.Duration) (MintResult, error) {
 	pt, err := randomHex(tokenBytes)
 	if err != nil {
@@ -183,12 +207,17 @@ func (s *FileStore) Mint(label string, scopes []string, ttl time.Duration) (Mint
 	if err != nil {
 		return MintResult{}, err
 	}
+	aesHex, err := randomHex(32)
+	if err != nil {
+		return MintResult{}, err
+	}
 	t := Token{
-		ID:        id,
-		Label:     label,
-		Scopes:    append([]string{}, scopes...),
-		CreatedAt: time.Now().UTC(),
-		Hash:      hashPlaintext(pt),
+		ID:           id,
+		Label:        label,
+		Scopes:       append([]string{}, scopes...),
+		CreatedAt:    time.Now().UTC(),
+		Hash:         hashPlaintext(pt),
+		AESSecretHex: aesHex,
 	}
 	if ttl > 0 {
 		exp := t.CreatedAt.Add(ttl)
@@ -202,7 +231,23 @@ func (s *FileStore) Mint(label string, scopes []string, ttl time.Duration) (Mint
 	if err != nil {
 		return MintResult{}, err
 	}
-	return MintResult{Token: t, Plaintext: pt}, nil
+	return MintResult{Token: t, Plaintext: pt, AESSecretHex: aesHex}, nil
+}
+
+// GetAESSecret implements Store.
+func (s *FileStore) GetAESSecret(keyID string) ([]byte, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, t := range s.tokens {
+		if t.ID == keyID && t.AESSecretHex != "" {
+			b, err := hex.DecodeString(t.AESSecretHex)
+			if err != nil {
+				return nil, false
+			}
+			return b, true
+		}
+	}
+	return nil, false
 }
 
 // SetMaster implements Store.

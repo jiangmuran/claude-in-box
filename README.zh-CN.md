@@ -27,7 +27,9 @@
 
 你能得到:
 
-- 一个沙箱化的 Linux 盒子,预装常用语言、工具链和 Claude Code 本体;
+- 一个沙箱化的 Linux 盒子,直接装好一整套真实开发环境 —— Node 20、Python 3(含 FastAPI + Uvicorn + Pydantic + httpx + rich + ipython)、Go 1.25、Rust,以及 `nginx`、`redis-server`、`postgresql`、Docker CLI/daemon —— 加上 Claude Code 本体;
+- 常用工具直接可用:ripgrep、fd、bat、htop、tmux、vim、nano、openssh-client、less、file、tree、jq、curl、wget、build-essential、make;
+- 内置服务默认不自启;在 `docker run` 时传 `CIB_SERVICES=redis,postgres,nginx`(可以是 `redis`、`postgres`、`nginx`、`docker` 的任意子集),entrypoint 会先把它们起好再起控制面;
 - 在虚拟 TTY 里运行的一个或多个会话,默认 bypass-permission 模式(容器本身就是边界,逐工具弹权限只会成为噪音);
 - 一个 Web UI,对同一个会话提供**三种并行视图** —— 原生虚拟终端、网页化的结构化 Claude 驱动、面向开发者的 API 检视器;
 - 结构化事件流:文本增量、工具调用、todo 更新、token 用量、状态变化、停止原因、模型元数据,全部以 JSON 帧通过 WebSocket / SSE 推出,**绝不靠刮 TTY**;
@@ -212,9 +214,11 @@ docker run -d --name claude-box \
   -e CIB_AUTH_TOKEN=$(openssl rand -hex 32) \
   -e CLAUDE_CODE_OAUTH_TOKEN=cclo_...      # 在你电脑上 `claude setup-token` 拿到
   -e CIB_PROXY_URL=socks5://user:pass@proxy.example:1080 \
+  -e CIB_SERVICES=redis,postgres \         # 自启内置服务
   -v $(pwd)/workspace:/workspace \
   -v $(pwd)/sessions:/var/lib/claude-in-box/sessions \
   -v $(pwd)/claude-home:/home/coder/.claude \
+  -v /var/run/docker.sock:/var/run/docker.sock \   # 可选:与宿主 Docker 通信
   ghcr.io/jiangmuran/claude-in-box:latest
 
 open http://localhost:8080

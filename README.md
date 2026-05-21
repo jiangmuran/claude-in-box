@@ -27,7 +27,9 @@ You run it on a real server (cloud VM, dedicated host, beefy home machine). Insi
 
 What you get:
 
-- a sandboxed Linux box preloaded with the languages, tools, and Claude Code itself;
+- a sandboxed Linux box preloaded with a real, batteries-included dev environment — Node 20, Python 3 (with FastAPI + Uvicorn + Pydantic + httpx + rich + ipython), Go 1.25, Rust, plus `nginx`, `redis-server`, `postgresql`, and the Docker CLI/daemon — and Claude Code itself;
+- common tools out of the box: ripgrep, fd, bat, htop, tmux, vim, nano, openssh-client, less, file, tree, jq, curl, wget, build-essential, make;
+- bundled services do not auto-start; pass `CIB_SERVICES=redis,postgres,nginx` (any subset of `redis`, `postgres`, `nginx`, `docker`) and the entrypoint brings them up before the control plane;
 - one or many virtual-TTY sessions running inside it, each a live Claude Code conversation in bypass-permission mode (the container is the sandbox, so per-tool prompts are unnecessary friction);
 - a Web UI that surfaces three concurrent views on the same session — raw virtual terminal, web-native structured Claude driver, and an API inspector for developers;
 - structured event streaming: text deltas, tool calls, todo updates, token usage, status changes, stop reasons, model metadata — all available as JSON frames over WebSocket or SSE, never screen-scraped from the TTY;
@@ -218,9 +220,11 @@ docker run -d --name claude-box \
   -e CIB_AUTH_TOKEN=$(openssl rand -hex 32) \
   -e CLAUDE_CODE_OAUTH_TOKEN=cclo_...      # from `claude setup-token` on your laptop
   -e CIB_PROXY_URL=socks5://user:pass@proxy.example:1080 \
+  -e CIB_SERVICES=redis,postgres \         # auto-start bundled services
   -v $(pwd)/workspace:/workspace \
   -v $(pwd)/sessions:/var/lib/claude-in-box/sessions \
   -v $(pwd)/claude-home:/home/coder/.claude \
+  -v /var/run/docker.sock:/var/run/docker.sock \   # optional: talk to host Docker
   ghcr.io/jiangmuran/claude-in-box:latest
 
 open http://localhost:8080

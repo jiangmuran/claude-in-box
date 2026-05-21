@@ -1,9 +1,16 @@
 # claude-in-box image.
 #
 # Multi-stage:
-#   1. golang:1.25-bookworm  → cross-compiles the cib control-plane binary.
-#   2. debian:bookworm-slim  → the runtime: full dev env (Node, Python, Go,
-#      Rust, claude-code) + the cib binary + the entrypoint shim.
+#   1. golang:1.25-bookworm   cross-compiles the cib control-plane binary.
+#   2. debian:bookworm-slim   the runtime: a complete dev environment
+#      (Node, Python + FastAPI, Go, Rust, claude-code), bundled services
+#      (nginx, Redis, PostgreSQL, Docker CLI), and common dev tools
+#      (ripgrep, fd, bat, htop, tmux, vim, nano, openssh-client, ...) plus
+#      the cib control-plane binary and entrypoint.
+#
+# Services do not auto-start. Set CIB_SERVICES=redis,postgres,nginx (or any
+# subset) at run-time and the entrypoint will bring them up before exec'ing
+# the control plane. See docker/cib-services.sh.
 #
 # Multi-arch: linux/amd64 and linux/arm64. armv7 is intentionally not built;
 # the server target is a real machine, not an SBC.
@@ -26,12 +33,11 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 
 WORKDIR /src
-
-# go.mod first for layer caching; no deps yet so go.sum is absent.
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 
 COPY cmd/ ./cmd/
+COPY internal/ ./internal/
 
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath \
@@ -49,23 +55,50 @@ ENV DEBIAN_FRONTEND=noninteractive \
     GOPATH=/home/coder/go \
     PATH=/usr/local/go/bin:/home/coder/go/bin:/usr/local/bin:/usr/bin:/bin
 
-# Base toolchain + transparent-SOCKS5 prerequisites.
+# Core tools + transparent-SOCKS5 prerequisites + Python + Rust toolchain.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget git jq sudo gnupg lsb-release \
-      build-essential pkg-config \
+      build-essential pkg-config make \
       python3 python3-pip python3-venv \
       rustc cargo \
-      redsocks nftables iproute2 dnsutils \
+      redsocks nftables iproute2 dnsutils netcat-openbsd \
       tini \
   && rm -rf /var/lib/apt/lists/*
 
-# Node.js LTS (for Claude Code).
+# Common dev tools: search, paging, editors, multiplexers, file utils.
+# bat ships as `batcat` on Debian and fd-find ships as `fdfind`; we symlink
+# both to their conventional names for parity with other distros.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ripgrep fd-find bat htop tmux \
+      vim nano less file tree unzip zip openssh-client \
+      ca-certificates curl \
+  && ln -sf /usr/bin/batcat   /usr/local/bin/bat \
+  && ln -sf /usr/bin/fdfind   /usr/local/bin/fd \
+  && rm -rf /var/lib/apt/lists/*
+
+# Bundled services: web (nginx), cache (redis), database (postgres),
+# container CLI+daemon (docker.io). Services do not auto-start; the
+# entrypoint conditionally brings them up based on CIB_SERVICES.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      nginx-light \
+      redis-server \
+      postgresql postgresql-client \
+      docker.io \
+  && rm -rf /var/lib/apt/lists/*
+
+# Python stack via Debian packages so we honour PEP 668 cleanly.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3-fastapi python3-uvicorn python3-pydantic \
+      python3-httpx python3-requests python3-pytest \
+      python3-rich ipython3 \
+  && rm -rf /var/lib/apt/lists/*
+
+# Node.js LTS (for Claude Code itself and for users).
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
   && apt-get update && apt-get install -y --no-install-recommends nodejs \
   && rm -rf /var/lib/apt/lists/*
 
-# Recent Go toolchain (Debian ships an older one; this gives users a current Go
-# inside the sessions). Selected per target architecture.
+# Recent Go toolchain (Debian ships an older one). Selected per target arch.
 ENV GO_VERSION=1.25.7
 RUN set -e; \
     case "${TARGETARCH:-amd64}" in \
@@ -81,7 +114,7 @@ RUN npm install -g @anthropic-ai/claude-code \
   && npm cache clean --force
 
 # Non-root user.
-RUN useradd -m -s /bin/bash -G sudo coder \
+RUN useradd -m -s /bin/bash -G sudo,docker coder \
   && printf 'coder ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/coder \
   && chmod 0440 /etc/sudoers.d/coder
 
@@ -90,16 +123,19 @@ RUN install -d -o coder -g coder /workspace \
                                 /var/lib/claude-in-box/sessions \
                                 /home/coder/.claude
 
-# Control-plane binary + entrypoint scripts.
+# Control-plane binary + entrypoint and service helpers.
 COPY --from=build /out/cib /usr/local/bin/cib
-COPY docker/entrypoint.sh /usr/local/bin/entrypoint
+COPY docker/entrypoint.sh    /usr/local/bin/entrypoint
+COPY docker/cib-services.sh  /usr/local/bin/cib-services
 COPY docker/redsocks.conf.template /etc/claude-in-box/redsocks.conf.template
-RUN chmod +x /usr/local/bin/entrypoint /usr/local/bin/cib
+COPY docker/nginx.default.conf     /etc/claude-in-box/nginx.default.conf
+RUN chmod +x /usr/local/bin/entrypoint /usr/local/bin/cib /usr/local/bin/cib-services
 
 # Sensible Claude Code env defaults; user can override.
 ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
     CIB_MODE="" \
-    CIB_PROXY_URL=""
+    CIB_PROXY_URL="" \
+    CIB_SERVICES=""
 
 EXPOSE 8080
 WORKDIR /workspace

@@ -8,11 +8,13 @@
 
 A Debian-slim image with:
 
-- Common language runtimes (Node, Python, Go, Rust) bundled in by default. This is **the complete dev environment** image; sessions get a real shell with real tools, not a stripped one.
+- Language runtimes: Node 20 LTS, Python 3 (plus FastAPI / Uvicorn / Pydantic / httpx / requests / pytest / rich / ipython3 from Debian packages), Go (current stable from go.dev), Rust (`rustc` / `cargo`).
+- Bundled services: `nginx-light`, `redis-server`, `postgresql` (+ `postgresql-client`), `docker.io` (CLI + daemon). None auto-start; the entrypoint reads `CIB_SERVICES` (comma-separated list of any of `redis`, `postgres`, `nginx`, `docker`) and brings up only what is requested. `cib-services {start,stop,status} <svc[,svc...]>` is also available from inside a session.
+- Common dev tools: `ripgrep`, `fd-find`, `bat`, `htop`, `tmux`, `vim`, `nano`, `openssh-client`, `less`, `file`, `tree`, `jq`, `curl`, `wget`, `make`, `build-essential`.
 - `claude` CLI preinstalled and pinned to a known version.
-- A non-root `coder` user with sudo, `/workspace` as its home.
+- A non-root `coder` user in groups `sudo` and `docker`, `/workspace` as its home.
 - `redsocks` plus `nftables` preinstalled to back the transparent SOCKS5 layer (§9).
-- An entrypoint that boots the control plane instead of dropping into a shell.
+- An entrypoint that runs the SOCKS5 setup (when configured), starts the requested services, then boots the control plane.
 - The Web UI bundle baked in; whether it is served on `/` is controlled at runtime by `CIB_MODE` (default = serve; `headless` = API-only, `/` returns 404).
 
 There is **one image, one tag**. No separate headless image. The same `:latest` runs both interactive desktops and API-only deployments — they differ only in env vars.

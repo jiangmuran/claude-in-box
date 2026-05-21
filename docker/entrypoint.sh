@@ -154,11 +154,17 @@ if [[ "$(id -u)" -eq 0 ]] && [[ "${CIB_RUN_AS_ROOT:-0}" != "1" ]]; then
     if [[ ! -e /home/coder/.claude.json ]]; then
         echo '{}' > /home/coder/.claude.json
     fi
-    if ! grep -q '"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true' /home/coder/.claude.json; then
-        tmp=$(mktemp)
-        jq '. + {hasCompletedOnboarding: true, lastOnboardingVersion: "2.1.146"}' \
-            /home/coder/.claude.json > "$tmp" && mv "$tmp" /home/coder/.claude.json
-    fi
+    # Both flags must be true for a brand-new session to land in the REPL
+    # straight away. Confirmed by `strings` against the v2.1.146 binary:
+    #   hasCompletedOnboarding          → gates the theme picker
+    #   bypassPermissionsModeAccepted   → gates the
+    #     --dangerously-skip-permissions confirmation screen
+    tmp=$(mktemp)
+    jq '. + {
+            hasCompletedOnboarding: true,
+            lastOnboardingVersion: "2.1.146",
+            bypassPermissionsModeAccepted: true
+        }' /home/coder/.claude.json > "$tmp" && mv "$tmp" /home/coder/.claude.json
     chown coder:coder /home/coder/.claude.json
     chmod 0600 /home/coder/.claude.json
 

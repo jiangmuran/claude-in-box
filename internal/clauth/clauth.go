@@ -83,21 +83,30 @@ func (m *Manager) resolveBin() (string, error) {
 }
 
 // Status returns the current authentication state.
+//
+// `claude auth status --json` exits with code 1 when not logged in but
+// still prints valid `{"loggedIn":false,...}` JSON on stdout. We must
+// parse the body regardless of exit code and only return an error if the
+// body itself is not parseable.
 func (m *Manager) Status(ctx context.Context) (StatusJSON, error) {
 	bin, err := m.resolveBin()
 	if err != nil {
 		return StatusJSON{}, err
 	}
 	cmd := exec.CommandContext(ctx, bin, "auth", "status", "--json")
-	out, err := cmd.Output()
-	if err != nil {
-		return StatusJSON{}, fmt.Errorf("clauth: auth status: %w", err)
+	out, runErr := cmd.Output()
+	// runErr is non-nil when the child exited non-zero (logged-out case).
+	// `out` still contains the stdout JSON though, so parse it first.
+	if len(out) > 0 {
+		var s StatusJSON
+		if jerr := json.Unmarshal(out, &s); jerr == nil {
+			return s, nil
+		}
 	}
-	var s StatusJSON
-	if err := json.Unmarshal(out, &s); err != nil {
-		return StatusJSON{}, fmt.Errorf("clauth: parse status: %w", err)
+	if runErr != nil {
+		return StatusJSON{}, fmt.Errorf("clauth: auth status: %w", runErr)
 	}
-	return s, nil
+	return StatusJSON{}, fmt.Errorf("clauth: auth status returned no parseable JSON")
 }
 
 // Logout invalidates current credentials.

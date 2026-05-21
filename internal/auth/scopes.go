@@ -10,6 +10,11 @@ const (
 	ScopeSessionsRead  = "sessions:read"
 	ScopeSessionsWrite = "sessions:write"
 	ScopeSessionsInput = "sessions:input"
+	ScopeShellsRead    = "shells:read"
+	ScopeShellsWrite   = "shells:write"
+	ScopeShellsInput   = "shells:input"
+	ScopeFSRead        = "fs:read"
+	ScopeFSWrite       = "fs:write"
 	ScopeHooksRead     = "hooks:read"
 	ScopeHooksWrite    = "hooks:write"
 	ScopeTokensRead    = "tokens:read"
@@ -23,6 +28,11 @@ var AllScopes = []string{
 	ScopeSessionsRead,
 	ScopeSessionsWrite,
 	ScopeSessionsInput,
+	ScopeShellsRead,
+	ScopeShellsWrite,
+	ScopeShellsInput,
+	ScopeFSRead,
+	ScopeFSWrite,
 	ScopeHooksRead,
 	ScopeHooksWrite,
 	ScopeTokensRead,

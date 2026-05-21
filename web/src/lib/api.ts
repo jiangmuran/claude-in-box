@@ -1,6 +1,9 @@
 import { authToken } from './stores'
 import { get } from 'svelte/store'
-import type { Session, TokenPublic, Frame, ClaudeAuthStatus, ClaudeFlowSnapshot } from './types'
+import type {
+  Session, TokenPublic, Frame, ClaudeAuthStatus, ClaudeFlowSnapshot,
+  ShellView, FSListResponse, FSReadResponse,
+} from './types'
 
 function authHeader(): HeadersInit {
   const t = get(authToken)
@@ -84,6 +87,28 @@ export const api = {
       label, scopes, ttl_hours: ttlHours,
     }),
   revokeToken:  (id: string) => req<void>('DELETE', `/api/tokens/${id}`),
+
+  // shells (plain-bash PTYs)
+  listShells:   () => req<{ shells: ShellView[] }>('GET', '/api/shells'),
+  createShell:  (opts: { cwd?: string; cmd?: string; args?: string[]; cols?: number; rows?: number } = {}) =>
+    req<ShellView>('POST', '/api/shells', opts),
+  getShell:     (id: string) => req<ShellView>('GET', `/api/shells/${id}`),
+  killShell:    (id: string) => req<void>('DELETE', `/api/shells/${id}`),
+  shellResize:  (id: string, cols: number, rows: number) =>
+    req<void>('POST', `/api/shells/${id}/resize`, { cols, rows }),
+
+  // files (constrained file browser/editor)
+  fsRoots: () => req<{ roots: string[] }>('GET', '/api/fs/roots'),
+  fsList:  (root: string, path: string) =>
+    req<FSListResponse>('GET', `/api/fs/list?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`),
+  fsRead:  (root: string, path: string) =>
+    req<FSReadResponse>('GET', `/api/fs/read?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`),
+  fsWrite: (root: string, path: string, content: string) =>
+    req<void>('PUT', '/api/fs/write', { root, path, content }),
+  fsMkdir: (root: string, path: string) =>
+    req<void>('POST', '/api/fs/mkdir', { root, path }),
+  fsDelete: (root: string, path: string) =>
+    req<void>('DELETE', `/api/fs/delete?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`),
 
   // claude auth (in-container `claude auth login`)
   claudeStatus: () => req<ClaudeAuthStatus>('GET', '/api/auth/claude/status'),

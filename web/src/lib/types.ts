@@ -85,3 +85,35 @@ export interface ClaudeFlowSnapshot {
   started_at: string
   error?: string
 }
+
+export interface ShellView {
+  id: string
+  cwd: string
+  cmd: string
+  created_at: string
+  running: boolean
+  exit_code?: number
+}
+
+export interface FSEntry {
+  name: string
+  path: string
+  is_dir: boolean
+  size: number
+  mode: string
+  mod_time: string
+}
+
+export interface FSListResponse {
+  root: string
+  path: string
+  entries: FSEntry[]
+}
+
+export interface FSReadResponse {
+  root: string
+  path: string
+  content: string
+  truncated: boolean
+  size: number
+}

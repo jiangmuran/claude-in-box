@@ -13,8 +13,10 @@ import (
 	aespkg "github.com/jiangmuran/claude-in-box/internal/aes"
 	"github.com/jiangmuran/claude-in-box/internal/auth"
 	"github.com/jiangmuran/claude-in-box/internal/clauth"
+	"github.com/jiangmuran/claude-in-box/internal/fsapi"
 	"github.com/jiangmuran/claude-in-box/internal/hooks"
 	"github.com/jiangmuran/claude-in-box/internal/session"
+	"github.com/jiangmuran/claude-in-box/internal/shell"
 )
 
 // Config carries everything Server needs at boot.
@@ -26,6 +28,8 @@ type Config struct {
 	Sessions   *session.Manager
 	Tokens     auth.Store
 	ClaudeAuth *clauth.Manager // may be nil — handlers return 503 in that case
+	Shells     *shell.Manager  // may be nil — handlers return 503
+	Files      *fsapi.Manager  // may be nil — handlers return 503
 	AESReplay  *aespkg.ReplayCache
 
 	// Version, Commit are reported by /api/health and the placeholder index.
@@ -102,6 +106,36 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /aes/keyinfo", s.aesKeyInfo)
 	mux.HandleFunc("POST /aes/sessions/{id}/input", s.aesInput)
 	mux.HandleFunc("POST /aes/sessions/{id}/events/poll", s.aesEventsPoll)
+
+	// Shells (plain-bash PTYs alongside Claude Code sessions).
+	mux.Handle("GET /api/shells",
+		auth.Require(s.cfg.Tokens, auth.ScopeShellsRead)(http.HandlerFunc(s.listShells)))
+	mux.Handle("POST /api/shells",
+		auth.Require(s.cfg.Tokens, auth.ScopeShellsWrite)(http.HandlerFunc(s.createShell)))
+	mux.Handle("GET /api/shells/{id}",
+		auth.Require(s.cfg.Tokens, auth.ScopeShellsRead)(http.HandlerFunc(s.getShell)))
+	mux.Handle("DELETE /api/shells/{id}",
+		auth.Require(s.cfg.Tokens, auth.ScopeShellsWrite)(http.HandlerFunc(s.killShell)))
+	mux.Handle("POST /api/shells/{id}/input",
+		auth.Require(s.cfg.Tokens, auth.ScopeShellsInput)(http.HandlerFunc(s.inputShell)))
+	mux.Handle("POST /api/shells/{id}/resize",
+		auth.Require(s.cfg.Tokens, auth.ScopeShellsInput)(http.HandlerFunc(s.resizeShell)))
+	mux.Handle("GET /ws/shells/{id}",
+		auth.Require(s.cfg.Tokens, auth.ScopeShellsRead)(http.HandlerFunc(s.streamShellWS)))
+
+	// Files (constrained file browser/editor).
+	mux.Handle("GET /api/fs/roots",
+		auth.Require(s.cfg.Tokens, auth.ScopeFSRead)(http.HandlerFunc(s.listFSRoots)))
+	mux.Handle("GET /api/fs/list",
+		auth.Require(s.cfg.Tokens, auth.ScopeFSRead)(http.HandlerFunc(s.fsList)))
+	mux.Handle("GET /api/fs/read",
+		auth.Require(s.cfg.Tokens, auth.ScopeFSRead)(http.HandlerFunc(s.fsRead)))
+	mux.Handle("PUT /api/fs/write",
+		auth.Require(s.cfg.Tokens, auth.ScopeFSWrite)(http.HandlerFunc(s.fsWrite)))
+	mux.Handle("POST /api/fs/mkdir",
+		auth.Require(s.cfg.Tokens, auth.ScopeFSWrite)(http.HandlerFunc(s.fsMkdir)))
+	mux.Handle("DELETE /api/fs/delete",
+		auth.Require(s.cfg.Tokens, auth.ScopeFSWrite)(http.HandlerFunc(s.fsDelete)))
 
 	// Claude auth (in-container `claude auth login --claudeai`).
 	mux.Handle("GET /api/auth/claude/status",

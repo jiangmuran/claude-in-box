@@ -17,8 +17,10 @@ import (
 
 	"github.com/jiangmuran/claude-in-box/internal/auth"
 	"github.com/jiangmuran/claude-in-box/internal/clauth"
+	"github.com/jiangmuran/claude-in-box/internal/fsapi"
 	"github.com/jiangmuran/claude-in-box/internal/server"
 	"github.com/jiangmuran/claude-in-box/internal/session"
+	"github.com/jiangmuran/claude-in-box/internal/shell"
 )
 
 const (
@@ -90,12 +92,16 @@ func run(addr, dataDir, claudeBin string) error {
 	sessionMgr.ControlAddr = loopbackAddr(addr)
 
 	claudeAuth := clauth.NewManager(claudeBin)
+	shellMgr := shell.NewManager("/workspace")
+	files := fsapi.NewManager()
 
 	srv := server.New(server.Config{
 		Mode:       mode,
 		Sessions:   sessionMgr,
 		Tokens:     tokenStore,
 		ClaudeAuth: claudeAuth,
+		Shells:     shellMgr,
+		Files:      files,
 		Version:    version,
 		Commit:     commit,
 	})

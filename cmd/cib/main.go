@@ -19,9 +19,14 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/jiangmuran/claude-in-box/internal/auth"
 )
 
-const defaultAddr = ":8080"
+const (
+	defaultAddr    = ":8080"
+	defaultDataDir = "/var/lib/claude-in-box"
+)
 
 // Stamped at build time via -ldflags="-X main.version=... -X main.commit=...".
 var (
@@ -32,6 +37,7 @@ var (
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	addr := flag.String("addr", defaultAddr, "listen address")
+	dataDir := flag.String("data-dir", defaultDataDir, "directory for tokens.json, sessions/, etc.")
 	flag.Parse()
 
 	if *showVersion {
@@ -41,13 +47,13 @@ func main() {
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 
-	if err := run(*addr); err != nil {
+	if err := run(*addr, *dataDir); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(addr string) error {
+func run(addr, dataDir string) error {
 	authToken := os.Getenv("CIB_AUTH_TOKEN")
 	authDisabled := os.Getenv("CIB_AUTH_DISABLED") == "1"
 	if authToken == "" && !authDisabled {
@@ -64,10 +70,22 @@ func run(addr string) error {
 		return fmt.Errorf("unknown CIB_MODE %q (want \"\" / \"default\" / \"headless\")", mode)
 	}
 
+	tokenStore, err := auth.NewFileStore(dataDir + "/tokens.json")
+	if err != nil {
+		return fmt.Errorf("init token store: %w", err)
+	}
+	if authToken != "" {
+		if err := tokenStore.SetMaster(authToken); err != nil {
+			return fmt.Errorf("register master token: %w", err)
+		}
+	}
+	_ = tokenStore // M1.5 wires this into the route middleware.
+
 	slog.Info("starting",
 		"version", version,
 		"commit", commit,
 		"addr", addr,
+		"data_dir", dataDir,
 		"mode", mode,
 		"auth_disabled", authDisabled,
 	)

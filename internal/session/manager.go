@@ -1,0 +1,300 @@
+package session
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/creack/pty"
+	"github.com/google/uuid"
+
+	"github.com/jiangmuran/claude-in-box/internal/stream"
+)
+
+// Manager owns the set of live sessions and the disk layout under BaseDir.
+type Manager struct {
+	BaseDir   string // e.g. /var/lib/claude-in-box/sessions
+	ClaudeBin string // path to the `claude` binary; defaults to looking it up on PATH
+
+	mu       sync.RWMutex
+	sessions map[string]*Session
+}
+
+// NewManager creates a Manager and ensures the base directory exists.
+//
+// claudeBin may be empty; it will be resolved at spawn time. Pass an absolute
+// path to pin a specific version of the claude CLI.
+func NewManager(baseDir, claudeBin string) (*Manager, error) {
+	if baseDir == "" {
+		return nil, errors.New("session.NewManager: baseDir is required")
+	}
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return nil, fmt.Errorf("session.NewManager: mkdir %s: %w", baseDir, err)
+	}
+	return &Manager{
+		BaseDir:   baseDir,
+		ClaudeBin: claudeBin,
+		sessions:  make(map[string]*Session),
+	}, nil
+}
+
+// SpawnOptions describe a new session to start.
+type SpawnOptions struct {
+	Workdir           string
+	Model             string
+	AuthMode          string // "subscription" | "api_key"
+	APIKey            string
+	OAuthToken        string
+	ResumeFrom        string
+	BypassPermissions bool
+
+	// Extra environment to pass to the child, in `KEY=VALUE` form. Used by
+	// hooks integration in M1.3 (e.g. CIB_HOOK_HMAC_SECRET) and tests.
+	ExtraEnv []string
+
+	// Test hooks. When OverrideArgs is non-nil, the command line is built from
+	// OverrideArgs verbatim (CC flags are ignored). When OverrideBin is set,
+	// it overrides the resolved `claude` binary.
+	OverrideBin  string
+	OverrideArgs []string
+}
+
+// Spawn launches a new Claude Code session under management. The returned
+// Session is already running.
+func (m *Manager) Spawn(ctx context.Context, opts SpawnOptions) (*Session, error) {
+	id := uuid.NewString()
+	dir := filepath.Join(m.BaseDir, id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("spawn: mkdir session dir: %w", err)
+	}
+
+	bin, args, err := m.commandFor(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	sess := &Session{
+		ID:        id,
+		Workdir:   opts.Workdir,
+		Model:     opts.Model,
+		AuthMode:  opts.AuthMode,
+		CreatedAt: time.Now().UTC(),
+		BaseDir:   dir,
+		bus:       stream.NewBus(id, 4096),
+		done:      make(chan struct{}),
+	}
+	sess.state.Store(stream.StateStarting)
+	sess.parser = stream.NewParser(sess.bus)
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Dir = opts.Workdir
+	cmd.Env = m.envFor(opts)
+	sess.cmd = cmd
+
+	master, err := pty.Start(cmd)
+	if err != nil {
+		sess.SetState(stream.StateFailed)
+		sess.closeBus()
+		return nil, fmt.Errorf("spawn: pty.Start: %w", err)
+	}
+	sess.pty = master
+	sess.StartedAt = time.Now().UTC()
+	sess.SetState(stream.StateIdle)
+
+	// Publish an initial meta frame so subscribers can see the model/workdir.
+	_, _ = sess.bus.Publish(stream.KindMeta, stream.MetaData{
+		Model:    opts.Model,
+		Workdir:  opts.Workdir,
+		AuthMode: opts.AuthMode,
+		Note:     "session started",
+	})
+
+	if err := sess.writeMeta(); err != nil {
+		// Non-fatal; log via cc.raw so it surfaces somewhere.
+		_, _ = sess.bus.Publish(stream.KindMeta, stream.MetaData{Note: "meta write failed: " + err.Error()})
+	}
+
+	m.mu.Lock()
+	m.sessions[id] = sess
+	m.mu.Unlock()
+
+	// Goroutine: feed the PTY's output into the parser.
+	go func() {
+		_ = sess.parser.Run(context.Background(), master)
+	}()
+
+	// Goroutine: wait for the process to exit; tear down.
+	go m.reap(sess)
+
+	return sess, nil
+}
+
+func (m *Manager) reap(s *Session) {
+	err := s.cmd.Wait()
+	exitCode := 0
+	failed := false
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			exitCode = ee.ExitCode()
+			failed = exitCode != 0
+		} else {
+			failed = true
+		}
+	}
+
+	s.mu.Lock()
+	s.StoppedAt = time.Now().UTC()
+	s.ExitCode = exitCode
+	s.mu.Unlock()
+
+	reason := "exit"
+	if failed {
+		reason = fmt.Sprintf("exit %d", exitCode)
+	}
+	_, _ = s.bus.Publish(stream.KindStop, stream.StopData{Reason: reason})
+
+	if failed {
+		s.SetState(stream.StateFailed)
+	} else {
+		s.SetState(stream.StateStopped)
+	}
+
+	_ = s.writeMeta()
+	s.closeBus()
+	close(s.done)
+}
+
+// Get returns the session with the given id, if any.
+func (m *Manager) Get(id string) (*Session, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s, ok := m.sessions[id]
+	return s, ok
+}
+
+// List returns a snapshot of all sessions, sorted by creation time (oldest first).
+func (m *Manager) List() []*Session {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out
+}
+
+// commandFor builds the (binary, args) tuple for a new session.
+func (m *Manager) commandFor(opts SpawnOptions) (string, []string, error) {
+	if opts.OverrideArgs != nil {
+		bin := opts.OverrideBin
+		if bin == "" && len(opts.OverrideArgs) > 0 {
+			bin = opts.OverrideArgs[0]
+		}
+		var args []string
+		if len(opts.OverrideArgs) > 1 {
+			args = opts.OverrideArgs[1:]
+		}
+		return bin, args, nil
+	}
+
+	bin := opts.OverrideBin
+	if bin == "" {
+		bin = m.ClaudeBin
+	}
+	if bin == "" {
+		bin = "claude"
+	}
+	if filepath.IsAbs(bin) {
+		if _, err := os.Stat(bin); err != nil {
+			return "", nil, fmt.Errorf("commandFor: claude binary %q: %w", bin, err)
+		}
+	} else if _, err := exec.LookPath(bin); err != nil {
+		return "", nil, fmt.Errorf("commandFor: claude binary %q not on PATH: %w", bin, err)
+	}
+
+	args := []string{
+		"--output-format", "stream-json",
+		"--include-hook-events",
+	}
+	if opts.BypassPermissions {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	if opts.Model != "" {
+		args = append(args, "--model", opts.Model)
+	}
+	if opts.ResumeFrom != "" {
+		args = append(args, "--resume", opts.ResumeFrom)
+	}
+	return bin, args, nil
+}
+
+// envFor builds the child environment. It preserves the parent's env (so
+// PATH/TERM/etc work) and layers per-session overrides on top.
+func (m *Manager) envFor(opts SpawnOptions) []string {
+	env := os.Environ()
+	overrides := map[string]string{}
+	switch opts.AuthMode {
+	case "api_key":
+		if opts.APIKey != "" {
+			overrides["ANTHROPIC_API_KEY"] = opts.APIKey
+			delete(overrides, "CLAUDE_CODE_OAUTH_TOKEN")
+		}
+	case "subscription":
+		if opts.OAuthToken != "" {
+			overrides["CLAUDE_CODE_OAUTH_TOKEN"] = opts.OAuthToken
+			delete(overrides, "ANTHROPIC_API_KEY")
+		}
+	}
+	// Make CC quieter for our needs; the user can re-enable.
+	if _, ok := overrides["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]; !ok {
+		overrides["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+	}
+
+	// Apply overrides + opts.ExtraEnv.
+	env = applyEnv(env, overrides)
+	if len(opts.ExtraEnv) > 0 {
+		extra := map[string]string{}
+		for _, kv := range opts.ExtraEnv {
+			for i := 0; i < len(kv); i++ {
+				if kv[i] == '=' {
+					extra[kv[:i]] = kv[i+1:]
+					break
+				}
+			}
+		}
+		env = applyEnv(env, extra)
+	}
+	return env
+}
+
+func applyEnv(env []string, overrides map[string]string) []string {
+	seen := map[string]bool{}
+	for i, kv := range env {
+		for j := 0; j < len(kv); j++ {
+			if kv[j] == '=' {
+				key := kv[:j]
+				if v, ok := overrides[key]; ok {
+					env[i] = key + "=" + v
+					seen[key] = true
+				}
+				break
+			}
+		}
+	}
+	for k, v := range overrides {
+		if !seen[k] {
+			env = append(env, k+"="+v)
+		}
+	}
+	return env
+}

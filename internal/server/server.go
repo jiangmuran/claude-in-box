@@ -94,9 +94,15 @@ func (s *Server) routes() {
 		mux.Handle("/internal/hooks/", hooksReceiver)
 	}
 
-	// Root: placeholder in default mode, 404 in headless.
+	// Root + UI assets: serve the embedded Svelte build in default mode.
+	// If the build is absent (e.g. `go run` without npm build), fall back
+	// to the inline placeholder index so health checks still work.
 	if s.cfg.Mode != "headless" {
-		mux.HandleFunc("GET /{$}", s.placeholderIndex)
+		if ui := uiHandler(); ui != nil {
+			mux.Handle("/", ui)
+		} else {
+			mux.HandleFunc("GET /{$}", s.placeholderIndex)
+		}
 	}
 }
 

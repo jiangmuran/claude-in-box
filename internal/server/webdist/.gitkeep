@@ -1,0 +1,3 @@
+# Placeholder so go:embed has a directory to find.
+# The real index.html and assets land here at build time via:
+#   npm --prefix web ci && npm --prefix web run build && cp -r web/dist/* internal/server/webdist/

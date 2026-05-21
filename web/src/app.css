@@ -1,0 +1,154 @@
+/* Fonts: bundled via @fontsource-variable so the box works offline. */
+@import '@fontsource-variable/fraunces';
+@import '@fontsource-variable/jetbrains-mono';
+@import '@xterm/xterm/css/xterm.css';
+
+:root {
+  /* Palette — extends the logo/banner. Coral + cream + warm ink. */
+  --cream:        #F5F0E8;
+  --cream-2:      #EADBCD;
+  --cream-3:      #DDC9B5;
+  --cream-edge:   #C4B098;
+  --coral:        #D97757;
+  --coral-dark:   #B85A3D;
+  --coral-deep:   #8B3D27;
+  --amber:        #FFB76B;
+  --ink:          #2C201A;
+  --ink-2:        #4A3A2E;
+  --ink-3:        #7A6452;
+  --ink-faint:    #A8927C;
+  --danger:       #A8281C;
+  --ok:           #5C8A6A;
+  --line:         rgba(74, 58, 46, 0.14);
+  --line-strong:  rgba(74, 58, 46, 0.32);
+  --shadow-1:     0 1px 0 rgba(74, 58, 46, 0.05), 0 8px 24px -12px rgba(74, 58, 46, 0.18);
+  --shadow-2:     0 2px 0 rgba(74, 58, 46, 0.06), 0 24px 60px -24px rgba(74, 58, 46, 0.32);
+
+  /* Type */
+  --font-display: 'Fraunces Variable', 'New York', Georgia, serif;
+  --font-mono:    'JetBrains Mono Variable', 'JetBrains Mono', Menlo, Consolas, monospace;
+
+  /* Density */
+  --r-xs: 2px;
+  --r-sm: 4px;
+  --r:    6px;
+  --r-lg: 10px;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+body {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--cream);
+  /* Subtle warm grain — pure SVG, no asset file needed. */
+  background-image:
+    radial-gradient(at 5% 0%, rgba(217, 119, 87, 0.06), transparent 40%),
+    radial-gradient(at 100% 100%, rgba(255, 183, 107, 0.05), transparent 40%);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'ss01' on, 'cv02' on, 'cv11' on;
+}
+
+::selection { background: var(--coral); color: var(--cream); }
+
+a {
+  color: var(--coral-dark);
+  text-decoration: none;
+  border-bottom: 1px solid currentColor;
+  transition: color 120ms ease;
+}
+a:hover { color: var(--coral-deep); }
+
+button {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+input, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+/* ---------- typographic helpers ---------- */
+
+.serif {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+  font-variation-settings: 'opsz' 144, 'SOFT' 50;
+}
+
+.mono { font-family: var(--font-mono); }
+
+.label {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+
+.label::before { content: '[ '; opacity: 0.55; }
+.label::after  { content: ' ]'; opacity: 0.55; }
+
+.kbd {
+  font-family: var(--font-mono);
+  font-size: 0.78em;
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--r-xs);
+  background: var(--cream-2);
+  color: var(--ink-2);
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.divider::before, .divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* ---------- scrollbar ---------- */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--cream-edge); border-radius: 8px; border: 2px solid var(--cream); }
+*::-webkit-scrollbar-thumb:hover { background: var(--coral); }
+
+/* ---------- focus ring (cohesive) ---------- */
+:focus-visible {
+  outline: 2px solid var(--coral);
+  outline-offset: 2px;
+  border-radius: var(--r-xs);
+}
+
+/* ---------- entry animation tokens ---------- */
+@keyframes rise {
+  from { transform: translateY(8px); opacity: 0; }
+  to   { transform: translateY(0);   opacity: 1; }
+}
+@keyframes fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}

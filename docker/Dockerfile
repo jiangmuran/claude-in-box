@@ -24,7 +24,15 @@
 #     -f docker/Dockerfile \
 #     --push .
 
-# ---------- stage 1: build ----------
+# ---------- stage 1a: web build ----------
+FROM --platform=$BUILDPLATFORM node:20-bookworm-slim AS web-build
+WORKDIR /web
+COPY web/package.json web/package-lock.json* ./
+RUN npm ci --no-audit --no-fund --prefer-offline
+COPY web/ ./
+RUN npm run build
+
+# ---------- stage 1b: go build ----------
 FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS build
 
 ARG TARGETOS
@@ -38,6 +46,9 @@ RUN go mod download
 
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
+
+# Drop the freshly built UI into the go:embed target before compiling.
+COPY --from=web-build /web/dist/ ./internal/server/webdist/
 
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath \

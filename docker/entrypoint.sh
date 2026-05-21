@@ -141,11 +141,24 @@ if [[ "$(id -u)" -eq 0 ]] && [[ "${CIB_RUN_AS_ROOT:-0}" != "1" ]]; then
             chown -R coder:coder "$d" 2>/dev/null || true
         fi
     done
-    # `runuser` keeps the env, including the proxy-stripped one we just set.
-    # `--preserve-environment` is the default; passing -- separates options
-    # from the command to exec.
     log "dropping privileges → coder"
-    exec runuser -u coder -- "$@"
+    # IMPORTANT: PAM's `pam_env` session module on Debian can RE-APPLY
+    # proxy env from /etc/environment and /etc/security/pam_env.conf on
+    # the runuser session boundary, undoing the unset we did above. Wrap
+    # the child in a bash that unsets the proxy vars *inside* the new
+    # session and only then execs the real command. Same applies to the
+    # case where Docker's daemon proxies leaked into the container env in
+    # the first place — they must NOT reach claude or its child node
+    # fetch (which crashes on `socks5://` URLs).
+    exec runuser -u coder -- bash -c '
+        unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY
+        unset http_proxy https_proxy ftp_proxy all_proxy no_proxy
+        exec "$@"
+    ' -- "$@"
 fi
 
+# Even when we stay root (CIB_RUN_AS_ROOT=1) the proxy strip from earlier
+# must still hold for any child of cib.
+unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY
+unset http_proxy https_proxy ftp_proxy all_proxy no_proxy
 exec "$@"

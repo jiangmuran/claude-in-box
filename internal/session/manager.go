@@ -317,6 +317,20 @@ func (m *Manager) envFor(opts SpawnOptions, additional ...string) []string {
 	if _, ok := overrides["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]; !ok {
 		overrides["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 	}
+	// Claude Code's interactive TUI (ink/yoga) needs a real TERM to
+	// initialise — without one it bails out and the process exits before
+	// showing anything, which our parser observes as a 3ms-then-failed
+	// session. Set xterm-256color unless the caller already supplied one.
+	if !hasEnvKV(env, "TERM=") && !hasEnvKV(opts.ExtraEnv, "TERM=") {
+		overrides["TERM"] = "xterm-256color"
+	}
+	// COLUMNS / LINES help ink lay out its UI when no SIGWINCH has fired yet.
+	if !hasEnvKV(env, "COLUMNS=") && !hasEnvKV(opts.ExtraEnv, "COLUMNS=") {
+		overrides["COLUMNS"] = "120"
+	}
+	if !hasEnvKV(env, "LINES=") && !hasEnvKV(opts.ExtraEnv, "LINES=") {
+		overrides["LINES"] = "32"
+	}
 
 	// Apply overrides + opts.ExtraEnv + manager-provided additions.
 	env = applyEnv(env, overrides)
@@ -335,6 +349,16 @@ func (m *Manager) envFor(opts SpawnOptions, additional ...string) []string {
 		env = applyEnv(env, extra)
 	}
 	return env
+}
+
+// hasEnvKV reports whether any entry in env starts with prefix (e.g. "TERM=").
+func hasEnvKV(env []string, prefix string) bool {
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // CheckHookToken implements hooks.Sink. Constant-time comparison.

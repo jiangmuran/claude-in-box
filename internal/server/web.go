@@ -14,31 +14,31 @@ import (
 //go:embed all:webdist
 var staticUI embed.FS
 
-// uiHandler returns the static file server for the embedded UI. When the
-// build artifacts are absent (e.g. `go run ./cmd/cib` without first running
-// `npm run build`), it returns nil and the caller falls back to the
-// placeholder index.
+// uiHandler returns the static file server for the embedded UI when a real
+// Vite build has been staged into webdist/. When only the placeholder
+// .gitkeep exists (e.g. `go run` without first running `scripts/build-web.sh`
+// or CI without the web job feeding dist), it returns nil so the caller
+// falls back to the inline placeholder index.
+//
+// The presence check is on `index.html`, not just "any entry", because
+// go:embed will happily slurp .gitkeep into the FS.
 func uiHandler() http.Handler {
 	sub, err := fs.Sub(staticUI, "webdist")
 	if err != nil {
 		return nil
 	}
-	entries, err := fs.ReadDir(sub, ".")
-	if err != nil || len(entries) == 0 {
+	if _, err := fs.Stat(sub, "index.html"); err != nil {
 		return nil
 	}
-	// SPA-style: any unknown path returns index.html so client-side routing
-	// can take over.
 	fsh := http.FileServer(http.FS(sub))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// API routes are matched first by the mux; if we are reached, this is
-		// a UI request.
 		path := strings.TrimPrefix(r.URL.Path, "/")
 		if path == "" {
 			path = "index.html"
 		}
 		if _, err := fs.Stat(sub, path); err != nil {
-			// Fall back to index.html for SPA paths.
+			// SPA fallback: any unknown path returns index.html so
+			// client-side routing can take over.
 			r2 := r.Clone(r.Context())
 			r2.URL.Path = "/"
 			fsh.ServeHTTP(w, r2)

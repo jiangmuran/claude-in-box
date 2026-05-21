@@ -67,8 +67,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/usr/local/go/bin:/home/coder/go/bin:/usr/local/bin:/usr/bin:/bin
 
 # Core tools + transparent-SOCKS5 prerequisites + Python + Rust toolchain.
+# `passwd` is required for `useradd` (debian-slim strips it from the base).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget git jq sudo gnupg lsb-release \
+      passwd adduser \
       build-essential pkg-config make \
       python3 python3-pip python3-venv \
       rustc cargo \

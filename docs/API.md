@@ -162,6 +162,48 @@ DELETE accepts `?signal=term` (default) or `?signal=kill`.
 
 ### `POST /api/sessions/{id}/interrupt` — ctrl-c
 
+## Port mapping — expose an in-container service on a host port
+
+cib ships with a `socat`-based forwarder so a service the user started
+inside the container (vite dev server, fastapi, jupyter, …) can be
+reached from outside without rebuilding the docker run line.
+
+Operator must give cib a pre-allocated host range when starting the
+container:
+
+```
+docker run -e CIB_PORT_RANGE=9000-9019 -p 9000-9019:9000-9019 ...
+```
+
+cib picks an unused host port from that range, runs
+`socat TCP-LISTEN:<host>,fork TCP:<internal_host>:<internal_port>`,
+and returns the mapping.
+
+### `GET /api/ports`
+
+```json
+{
+  "range":    [9000, 9019],
+  "mappings": [
+    { "host_port": 9000, "internal_port": 5173, "internal_host": "127.0.0.1", "created_at": "..." }
+  ]
+}
+```
+
+### `POST /api/ports/expose`
+
+```jsonc
+{ "internal_port": 5173, "internal_host": "127.0.0.1" }   // internal_host optional, defaults to 127.0.0.1
+```
+
+→ 201 `{ "host_port": 9000, "internal_port": 5173, ... }`.
+503 if `CIB_PORT_RANGE` is unset, 400 if the range is full or the
+internal port is invalid.
+
+### `DELETE /api/ports/{host_port}`
+
+Tears down the forwarder; idempotent — 404 if no mapping for that host port.
+
 ### `POST /api/sessions/{id}/send` — one-shot send-and-wait
 
 Best path for MCU / non-streaming clients: write a prompt, block until

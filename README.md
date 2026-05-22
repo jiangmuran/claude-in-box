@@ -35,7 +35,7 @@ What you get:
 - structured event streaming: text deltas, tool calls, todo updates, token usage, status changes, stop reasons, model metadata — all available as JSON frames over WebSocket or SSE, never screen-scraped from the TTY;
 - session lifecycle controls: create, attach, resume, kill, switch models on the fly;
 - two ways to bill Claude per session: an Anthropic subscription (via a long-lived OAuth token you mint on your laptop with `claude setup-token`), or an API key;
-- a Web API in multiple wrappings off one port: our native frame schema (REST + WS + SSE + AES envelope), plus planned **Anthropic-compatible** (`/v1/messages`) and **OpenAI-compatible** (`/openai/v1/chat/completions`) adapters so existing SDKs can target the box as a drop-in;
+- a Web API in multiple wrappings off one port: our native frame schema (REST + WS + SSE + AES envelope), **Anthropic-compatible** `POST /v1/messages` and **OpenAI-compatible** `POST /openai/v1/chat/completions` adapters with full incremental SSE streaming so existing SDKs can target the box as a drop-in, plus an MCU-friendly slim chat (`/sse/sessions/{id}/chat` or `/aes/sessions/{id}/chat`) and a one-shot `/api/sessions/{id}/send` send-and-wait endpoint;
 - a transparent SOCKS5 layer so every outbound packet from inside the box can be rerouted through one upstream proxy without per-tool config;
 - programmable hooks on every lifecycle event;
 - a single multi-arch image (`linux/amd64`, `linux/arm64`) that boots equally cleanly on x86 servers and Ampere-class arm64 hosts.
@@ -69,8 +69,9 @@ The point: stop tying Claude Code to one workstation. Put it on a real server yo
     typed event stream, not by screen-scraping the terminal.
 9.  From a phone, tablet, embedded MCU, or another agent, hit the same
     sessions over the transport and API shape that suits the client —
-    REST/WS for browsers, AES envelope for an ESP32, Anthropic- or
-    OpenAI-compatible HTTP for off-the-shelf SDKs (planned).
+    REST/WS for browsers, AES envelope or SSE for an ESP32, Anthropic- or
+    OpenAI-compatible HTTP for off-the-shelf SDKs (shipped — see
+    `docs/API.md`).
 ```
 
 That is the loop the rest of this README is here to explain.
@@ -95,7 +96,9 @@ That is the loop the rest of this README is here to explain.
 |------|-------------|-----|
 | Anthropic subscription (default for personal use) | You already pay for Claude Pro / Max and want it billed there. | On your laptop, run `claude setup-token` to mint a long-lived OAuth token. Pass it as `CLAUDE_CODE_OAUTH_TOKEN` to the container, or per-session via the API. |
 | API key | Programmatic, CI, paying per token, or sharing the box across people who all have their own keys. | Set `ANTHROPIC_API_KEY` on the container, or per-session via the API. |
-| In-container interactive `claude /login` | Convenience for users who do not want to fuss with `claude setup-token`. | Roadmap (M3). Web UI will drive an OAuth callback flow against a PTY-backed `claude /login`. |
+| In-container interactive `claude /login` | Convenience for users who do not want to fuss with `claude setup-token`. | Shipped. The Web UI's unified auth modal drives the PTY-backed OAuth flow end-to-end (start → paste code → finish). |
+| Third-party Anthropic-compatible host | You want to point at jmrai.net or your own proxy with a different `api_host`. | Built-in `jmrai.net` preset in the auth modal — paste your key, save, done. Custom host/key/label also supported. |
+| Mutual exclusion | Subscription and API-key paths cannot both be active at once. | Configuring an API provider wipes claude.ai credentials; logging into subscription deletes all configured providers. Enforced server-side. |
 
 Subscription billing only works because CC stays in interactive REPL mode inside the container — see the row above.
 
@@ -133,8 +136,11 @@ The container exposes exactly one TCP port. Everything is multiplexed onto it th
 | Native frame REST + WS | `/api/*`, `/ws/*` | Browser, phone, server, our Web UI | TLS via nginx | Bearer token (master or device-scoped) | M1 |
 | Native frame SSE | `/sse/*` | Cheap one-way clients, log tailers | TLS via nginx | Bearer | M1 |
 | HTTP + AES envelope | `/aes/*` | Bare-metal MCU (ESP32, STM32), no TLS stack | AES-256-GCM per-device key | API key + per-request nonce | M1 |
-| Anthropic-compatible API | `/v1/messages`, `/v1/messages?stream=true` | Existing Claude SDK clients — point base URL at the box, get subscription-backed Claude | TLS via nginx | Bearer / API key | M3 (planned) |
-| OpenAI-compatible API | `/openai/v1/chat/completions` | Existing OpenAI SDK clients | TLS via nginx | Bearer / API key | M3 (planned) |
+| Anthropic-compatible API | `/v1/messages`, `stream=true` SSE | Existing Claude SDK clients — point base URL at the box, get subscription-backed Claude | TLS via nginx | Bearer / API key | **Shipped** (per-request session spawn, incremental streaming) |
+| OpenAI-compatible API | `/openai/v1/chat/completions` | Existing OpenAI SDK clients | TLS via nginx | Bearer / API key | **Shipped** (per-request session spawn, incremental streaming) |
+| Slim chat (embedded) | `/api/sessions/{id}/chat` REST, `/sse/sessions/{id}/chat` SSE, `/aes/sessions/{id}/chat` over AES | MCU clients with a few hundred KB of RAM | TLS / AES envelope | Bearer / AES key | **Shipped** |
+| Send-and-wait | `POST /api/sessions/{id}/send` | One HTTP round-trip per turn for non-streaming clients | TLS via nginx | Bearer | **Shipped** |
+| Port mapping | `GET/POST/DELETE /api/ports/*` | Surface an in-container service on a host port via socat | TLS via nginx | Bearer | **Shipped** (requires `CIB_PORT_RANGE` on docker run) |
 | MQTT bridge | — | IoT bus integrations | TLS or pre-shared | Per topic | Roadmap |
 | Raw TCP framed | — | Absolute minimum footprint | AES-GCM | API key | Roadmap |
 

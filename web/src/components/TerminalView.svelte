@@ -55,6 +55,12 @@
     term.open(host)
     fit.fit()
     term.writeln('\x1b[2m— attached to session ' + sessionId + ' —\x1b[0m')
+    // Take keyboard focus immediately so the user can type without
+    // clicking into the viewport first. Also re-focus when the host
+    // element is clicked anywhere (not just the textarea inside xterm).
+    term.focus()
+    host?.addEventListener('mousedown', () => term?.focus())
+    requestAnimationFrame(() => term?.focus())
 
     // Wire keystrokes from xterm → PTY via the input API so the user
     // can navigate Claude Code's TUI directly (theme picker, /resume,
@@ -105,21 +111,29 @@
 
 <style>
   .wrap {
-    flex: 1;
+    flex: 1 1 0;
+    min-height: 0;
+    max-height: 100%;
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
     padding: 0.75rem clamp(0.5rem, 2vw, 1.25rem) 1rem;
-    min-height: 0;
+    overflow: hidden;
   }
+  /* Hard-cap the terminal area so xterm's internal scrollback handles
+     long output instead of the page itself growing. The 1px+min-height:0
+     pair lets flex compute against an effectively-zero floor; flex:1 1 0
+     then takes whatever is left of the column. */
   .term {
-    flex: 1;
+    flex: 1 1 0;
     min-height: 0;
+    max-height: 100%;
     background: #1F1814;
     border: 1px solid var(--ink-2);
     box-shadow: var(--shadow-1);
     padding: 0.75rem;
     position: relative;
+    overflow: hidden;
   }
   .term::before {
     content: '';
@@ -129,7 +143,13 @@
     pointer-events: none;
   }
   :global(.xterm) { height: 100%; }
-  :global(.xterm .xterm-viewport) { background: transparent !important; }
+  :global(.xterm-viewport) {
+    background: transparent !important;
+    /* Native scrollbar styling so the terminal's own scrollback feels
+       like a real terminal, not a content overflow. */
+    scrollbar-width: thin;
+    scrollbar-color: rgba(217,119,87,0.4) transparent;
+  }
 
   .hint {
     color: var(--ink-faint);

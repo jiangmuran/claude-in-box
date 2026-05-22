@@ -92,6 +92,11 @@ func (s *Server) routes() {
 		auth.Require(s.cfg.Tokens, auth.ScopeSessionsWrite)(http.HandlerFunc(s.interruptSession)))
 	mux.Handle("GET /api/sessions/{id}/transcript",
 		auth.Require(s.cfg.Tokens, auth.ScopeSessionsRead)(http.HandlerFunc(s.transcriptSession)))
+	// Chat-shaped aggregate of the same data. Same bubble model the Web UI
+	// renders; downstream non-Web clients can hit this instead of walking
+	// the raw frame stream themselves.
+	mux.Handle("GET /api/sessions/{id}/messages",
+		auth.Require(s.cfg.Tokens, auth.ScopeSessionsRead)(http.HandlerFunc(s.listMessages)))
 
 	// Streams.
 	mux.Handle("GET /ws/sessions/{id}",

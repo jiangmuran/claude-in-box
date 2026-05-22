@@ -1,6 +1,17 @@
 <script lang="ts">
-  import { chatFrames } from '../lib/stores'
+  import { chatFrames, activeSessionId } from '../lib/stores'
+  import { api } from '../lib/api'
+  import { mdToHtml } from '../lib/md'
   import type { Frame } from '../lib/types'
+
+  // AskUserQuestion shape (the skill claude uses when it wants the user
+  // to pick from explicit options instead of free-form text).
+  type AskQ = {
+    question: string
+    header: string
+    multiSelect: boolean
+    options: { label: string; description?: string; preview?: string }[]
+  }
 
   // Collapse consecutive same-role text.delta frames into single messages,
   // mirroring claude-code-webui's UnifiedMessageProcessor turn handling.
@@ -9,6 +20,7 @@
     | { type: 'thinking'; seq: number; text: string }
     | { type: 'tool'; seq: number; toolUseId?: string; tool: string; input?: unknown; result?: unknown; error?: string; isError?: boolean; durationMs?: number }
     | { type: 'todo'; seq: number; items: { subject: string; status: string; activeForm?: string }[] }
+    | { type: 'askq'; seq: number; questions: AskQ[] }
     | { type: 'ask'; seq: number; prompt: string; options: { label: string; description?: string }[]; multi: boolean }
     | { type: 'meta'; seq: number; note: string }
 
@@ -45,6 +57,16 @@
         case 'tool.use.start': {
           flush()
           const d = f.data as { tool?: string; input?: unknown; tool_use_id?: string }
+          // Special-case AskUserQuestion: render as an interactive
+          // question card with clickable options, not a tool bubble.
+          if (d?.tool === 'AskUserQuestion') {
+            const qs = (d?.input as { questions?: AskQ[] })?.questions ?? []
+            if (qs.length > 0) {
+              out.push({ type: 'askq', seq: f.seq, questions: qs })
+              if (d?.tool_use_id) toolIdx.set(d.tool_use_id, -1) // skip joining result
+              break
+            }
+          }
           const b: Bubble = { type: 'tool', seq: f.seq, toolUseId: d?.tool_use_id, tool: d?.tool ?? 'tool', input: d?.input }
           out.push(b)
           if (d?.tool_use_id) toolIdx.set(d.tool_use_id, out.length - 1)
@@ -54,6 +76,7 @@
           flush()
           const d = f.data as { tool?: string; output?: unknown; error?: string; is_error?: boolean; duration_ms?: number; tool_use_id?: string }
           const at = d?.tool_use_id ? toolIdx.get(d.tool_use_id) : undefined
+          if (at === -1) break // suppressed (e.g. AskUserQuestion answered inline)
           if (at != null && out[at]?.type === 'tool') {
             const t = out[at] as Extract<Bubble, { type: 'tool' }>
             t.result = d?.output
@@ -98,6 +121,13 @@
 
   let bubbles = $derived(aggregate($chatFrames))
 
+  async function answerOption(n: number) {
+    let sid = ''
+    activeSessionId.subscribe((v) => (sid = v))()
+    if (!sid) return
+    try { await api.sendInput(sid, String(n) + '\r') } catch { /* surface as ask error later */ }
+  }
+
   function fmt(input: unknown): string {
     if (input == null) return ''
     if (typeof input === 'string') return input
@@ -124,7 +154,34 @@
             <span class="who">{b.role === 'user' ? 'you' : 'claude'}</span>
             <span class="seq mono">#{b.seq}</span>
           </div>
-          <div class="bubble-body serif">{b.text}</div>
+          {#if b.role === 'assistant'}
+            <div class="bubble-body md serif">{@html mdToHtml(b.text)}</div>
+          {:else}
+            <div class="bubble-body serif">{b.text}</div>
+          {/if}
+        </article>
+      {:else if b.type === 'askq'}
+        <article class="bubble askq">
+          {#each b.questions as q, qi (qi)}
+            <div class="askq-block">
+              <div class="bubble-head">
+                <span class="who">claude · asks</span>
+                <span class="hdr mono">{q.header}</span>
+              </div>
+              <div class="bubble-body md serif">{@html mdToHtml(q.question)}</div>
+              <ul class="askq-opts">
+                {#each q.options as opt, oi (oi)}
+                  <li>
+                    <button class="askq-opt" onclick={() => answerOption(oi + 1)}>
+                      <span class="num mono">{oi + 1}</span>
+                      <span class="lbl">{opt.label}</span>
+                      {#if opt.description}<span class="desc">{opt.description}</span>{/if}
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            </div>
+          {/each}
         </article>
       {:else if b.type === 'thinking'}
         <article class="bubble thinking">
@@ -262,6 +319,119 @@
   }
   .bubble.thinking .who { color: var(--ink-3); }
   .bubble.thinking .bubble-body { color: var(--ink-3); font-style: italic; font-size: 0.92rem; }
+
+  /* --- markdown content inside assistant bubbles --- */
+  .bubble-body.md :global(p) { margin: 0 0 0.6em; }
+  .bubble-body.md :global(p:last-child) { margin-bottom: 0; }
+  .bubble-body.md :global(h1),
+  .bubble-body.md :global(h2),
+  .bubble-body.md :global(h3) {
+    font-family: var(--font-display);
+    font-weight: 500;
+    margin: 0.8em 0 0.4em;
+    line-height: 1.25;
+  }
+  .bubble-body.md :global(h1) { font-size: 1.4rem; }
+  .bubble-body.md :global(h2) { font-size: 1.2rem; }
+  .bubble-body.md :global(h3) { font-size: 1.05rem; }
+  .bubble-body.md :global(a) {
+    color: var(--coral-dark);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .bubble-body.md :global(code) {
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+    background: var(--cream-2);
+    padding: 0.1em 0.4em;
+    border-radius: var(--r-xs);
+    color: var(--coral-deep);
+  }
+  .bubble-body.md :global(pre) {
+    background: #1F1814;
+    color: #E9DBC6;
+    border-radius: var(--r-xs);
+    padding: 0.75rem 1rem;
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    margin: 0.5em 0;
+  }
+  .bubble-body.md :global(pre code) {
+    background: transparent;
+    padding: 0;
+    color: inherit;
+  }
+  .bubble-body.md :global(ul),
+  .bubble-body.md :global(ol) { margin: 0.4em 0 0.6em 1.4em; padding: 0; }
+  .bubble-body.md :global(li) { margin: 0.15em 0; }
+  .bubble-body.md :global(blockquote) {
+    border-left: 3px solid var(--coral);
+    padding-left: 0.8em;
+    color: var(--ink-2);
+    margin: 0.5em 0;
+    font-style: italic;
+  }
+  .bubble-body.md :global(table) {
+    border-collapse: collapse;
+    margin: 0.5em 0;
+    font-size: 0.9em;
+  }
+  .bubble-body.md :global(th),
+  .bubble-body.md :global(td) {
+    border: 1px solid var(--line-strong);
+    padding: 0.35em 0.6em;
+  }
+  .bubble-body.md :global(th) { background: var(--cream-2); font-weight: 500; }
+  .bubble-body.md :global(hr) { border: none; border-top: 1px dashed var(--line); margin: 1em 0; }
+
+  /* --- askq (AskUserQuestion skill) --- */
+  .bubble.askq {
+    background: linear-gradient(180deg, rgba(217,119,87,0.06), transparent);
+    border-color: var(--coral);
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  .askq-block { display: flex; flex-direction: column; gap: 0.5rem; }
+  .askq-block .hdr {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .askq-opts { list-style: none; padding: 0; margin: 0.3rem 0 0; display: grid; gap: 0.4rem; }
+  .askq-opt {
+    width: 100%;
+    text-align: left;
+    display: grid;
+    grid-template-columns: 1.6rem 1fr;
+    column-gap: 0.65rem;
+    row-gap: 0.15rem;
+    align-items: baseline;
+    padding: 0.55rem 0.75rem;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-xs);
+    background: var(--cream);
+    color: var(--ink);
+    cursor: pointer;
+    transition: border-color 120ms ease, background 120ms ease;
+  }
+  .askq-opt:hover { border-color: var(--coral); background: rgba(217,119,87,0.04); }
+  .askq-opt .num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.4rem;
+    height: 1.4rem;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-xs);
+    font-size: 11px;
+    color: var(--coral-dark);
+    grid-row: 1;
+  }
+  .askq-opt .lbl { grid-column: 2; font-family: var(--font-display); font-size: 0.95rem; }
+  .askq-opt .desc { grid-column: 2; font-size: 0.82rem; color: var(--ink-3); font-family: var(--font-display); font-variation-settings: 'opsz' 14; }
 
   .bubble.todo { background: var(--cream-2); border-color: var(--line-strong); }
   .bubble.todo .who { color: var(--coral-dark); }

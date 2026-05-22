@@ -46,6 +46,8 @@
     </nav>
 
     <div class="rightside">
+      <a class="doc-link mono" href="https://github.com/jiangmuran/claude-in-box" target="_blank" rel="noreferrer" title="github repo">github</a>
+      <a class="doc-link mono" href="https://github.com/jiangmuran/claude-in-box/blob/main/docs/API.md" target="_blank" rel="noreferrer" title="API reference">docs</a>
       {#if claudeAuth}
         {#if claudeAuth.loggedIn}
           <button class="auth-chip is-in mono" onclick={() => (loginOpen = true)} title={claudeAuth.email ?? ''}>
@@ -140,6 +142,15 @@
   }
 
   .rightside { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; }
+  .doc-link {
+    font-size: 11px;
+    color: var(--ink-3);
+    border-bottom: 1px dotted var(--line-strong);
+    text-decoration: none;
+    padding: 0.1rem 0.15rem;
+    transition: color 120ms ease, border-color 120ms ease;
+  }
+  .doc-link:hover { color: var(--coral-dark); border-color: var(--coral); }
   .auth-chip {
     display: inline-flex;
     align-items: center;

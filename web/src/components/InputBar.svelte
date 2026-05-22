@@ -31,7 +31,10 @@
   }
 
   async function interrupt() {
-    try { await api.interrupt(sessionId) } catch {}
+    // claude's REPL cancels the in-flight turn on Esc (status bar:
+    // "esc to interrupt"). SIGINT exits the REPL entirely, which is
+    // almost never what the user wants.
+    try { await api.sendInput(sessionId, '\x1b') } catch {}
   }
 
   function onkeydown(e: KeyboardEvent) {
@@ -39,7 +42,7 @@
       e.preventDefault()
       submit()
     }
-    if (e.key === 'c' && e.ctrlKey) {
+    if (e.key === 'Escape') {
       e.preventDefault()
       interrupt()
     }
@@ -70,8 +73,8 @@
     {#if error}
       <span class="err mono" title={error}>[ {$T('err', '错误')} ]</span>
     {/if}
-    <button type="button" class="ghost" onclick={interrupt} disabled={disabled} title={$T('ctrl+c interrupt', 'ctrl+c 中断')}>
-      <span class="mono">^C</span>
+    <button type="button" class="ghost" onclick={interrupt} disabled={disabled} title={$T('esc interrupt', 'esc 中断当前任务')}>
+      <span class="mono">esc</span>
     </button>
     <button type="submit" class="send" disabled={disabled || busy || !text.trim()}>
       <span class="mono">{busy ? '·' : '↵'}</span>

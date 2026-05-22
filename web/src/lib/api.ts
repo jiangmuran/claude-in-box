@@ -66,7 +66,7 @@ export const api = {
     api_key?: string
     oauth_token?: string
     provider_id?: string
-    resume_from?: string
+    resume_from?: string  // accept cib UUID; server translates to claude session_id
     bypass_permissions?: boolean
   }) => req<Session>('POST', '/api/sessions', opts),
   killSession:   (id: string, signal: 'term' | 'kill' = 'term') =>

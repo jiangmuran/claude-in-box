@@ -428,6 +428,17 @@ func (m *Manager) EmitHookFrame(sessionID, event string, payload json.RawMessage
 		if s.transcriptStop == nil {
 			ctx, cancel := context.WithCancel(context.Background())
 			w := cctranscript.New(tc.TranscriptPath, busAdapter{bus})
+			w.OnInit = func(claudeSID, model, workdir string) {
+				s.mu.Lock()
+				if s.ClaudeSessionID == "" {
+					s.ClaudeSessionID = claudeSID
+				}
+				if model != "" && s.Model == "" {
+					s.Model = model
+				}
+				s.mu.Unlock()
+				_ = s.writeMeta()
+			}
 			w.Start(ctx)
 			s.transcriptStop = cancel
 		}

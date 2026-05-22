@@ -42,7 +42,9 @@ export interface Session {
   id: string
   workdir: string
   model?: string
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | string
   auth_mode?: 'subscription' | 'api_key' | string
+  claude_session_id?: string
   state: SessionState
   created_at: string
   started_at?: string

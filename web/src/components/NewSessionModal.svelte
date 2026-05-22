@@ -16,6 +16,8 @@
   let effort = $state<'' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'>('')
   let authMode = $state<'subscription' | 'api_key'>('subscription')
   let providerId = $state('')
+  let resumeFrom = $state('')
+  let resumeCandidates = $state<Session[]>([])
   let providers = $state<Provider[]>([])
   let providersOpen = $state(false)
   let busy = $state(false)
@@ -35,7 +37,18 @@
       }
     } catch { /* prefs are optional */ }
     await refreshProviders()
+    await refreshResumeCandidates()
   })
+
+  async function refreshResumeCandidates() {
+    try {
+      const r = await api.listSessions()
+      resumeCandidates = (r.sessions ?? [])
+        .filter((s) => s.claude_session_id)
+        .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+        .slice(0, 8)
+    } catch { /* best-effort */ }
+  }
 
   async function refreshProviders() {
     try {
@@ -57,6 +70,7 @@
         effort: effort || undefined,
         auth_mode: authMode,
         provider_id: authMode === 'api_key' && providerId ? providerId : undefined,
+        resume_from: resumeFrom || undefined,
         bypass_permissions: true,
       })
       // Remember the user's choices so the next launch is one-click.
@@ -108,6 +122,20 @@
         spellcheck="false"
       />
     </label>
+
+    {#if resumeCandidates.length > 0}
+      <label class="field">
+        <span class="label">{$T('resume · optional', '续上之前的会话 · 可选')}</span>
+        <select bind:value={resumeFrom} class="resume-pick mono" disabled={busy}>
+          <option value="">{$T('— start a fresh session —', '— 全新会话 —')}</option>
+          {#each resumeCandidates as s (s.id)}
+            <option value={s.id}>
+              {s.id.slice(0, 8)} · {s.workdir} · {new Date(s.created_at).toLocaleString()}
+            </option>
+          {/each}
+        </select>
+      </label>
+    {/if}
 
     <div class="field">
       <span class="label">{$T('thinking effort · optional', '思考深度 · 可选')}</span>
@@ -274,6 +302,16 @@
   .seg-btn.active { background: var(--ink); color: var(--cream); }
   .seg-btn:hover:not(.active) { background: var(--cream-2); }
 
+  .resume-pick {
+    width: 100%;
+    border: 1px solid var(--line-strong);
+    background: var(--cream);
+    padding: 0.4rem 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--ink);
+    border-radius: var(--r-xs);
+  }
   .provider-row {
     display: grid;
     grid-template-columns: 1fr auto;

@@ -34,11 +34,16 @@ type Session struct {
 	Model     string    `json:"model,omitempty"`
 	Effort    string    `json:"effort,omitempty"`
 	AuthMode  string    `json:"auth_mode,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	StartedAt time.Time `json:"started_at,omitempty"`
-	StoppedAt time.Time `json:"stopped_at,omitempty"`
-	ExitCode  int       `json:"exit_code,omitempty"`
-	BaseDir   string    `json:"-"` // sessions/<id>/
+	// ClaudeSessionID is claude's OWN internal session id, captured from
+	// the system.init line in the transcript JSONL. We need it for
+	// --resume because claude indexes its transcripts by this, not by
+	// cib's UUID.
+	ClaudeSessionID string    `json:"claude_session_id,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	StartedAt       time.Time `json:"started_at,omitempty"`
+	StoppedAt       time.Time `json:"stopped_at,omitempty"`
+	ExitCode        int       `json:"exit_code,omitempty"`
+	BaseDir         string    `json:"-"` // sessions/<id>/
 
 	// HookToken is the per-session shared secret used to authenticate hook
 	// callbacks the child process makes back to /internal/hooks/<id>. Never
@@ -70,17 +75,18 @@ func (s *Session) HookToken() string { return s.hookToken }
 // Use this from API handlers; direct field reads on Session race with the
 // reaper goroutine which writes StoppedAt / ExitCode at process exit.
 type Status struct {
-	ID        string       `json:"id"`
-	Workdir   string       `json:"workdir"`
-	Model     string       `json:"model,omitempty"`
-	Effort    string       `json:"effort,omitempty"`
-	AuthMode  string       `json:"auth_mode,omitempty"`
-	State     stream.State `json:"state"`
-	CreatedAt time.Time    `json:"created_at"`
-	StartedAt time.Time    `json:"started_at,omitempty"`
-	StoppedAt time.Time    `json:"stopped_at,omitempty"`
-	ExitCode  int          `json:"exit_code,omitempty"`
-	LastSeq   uint64       `json:"last_seq"`
+	ID              string       `json:"id"`
+	Workdir         string       `json:"workdir"`
+	Model           string       `json:"model,omitempty"`
+	Effort          string       `json:"effort,omitempty"`
+	AuthMode        string       `json:"auth_mode,omitempty"`
+	ClaudeSessionID string       `json:"claude_session_id,omitempty"`
+	State           stream.State `json:"state"`
+	CreatedAt       time.Time    `json:"created_at"`
+	StartedAt       time.Time    `json:"started_at,omitempty"`
+	StoppedAt       time.Time    `json:"stopped_at,omitempty"`
+	ExitCode        int          `json:"exit_code,omitempty"`
+	LastSeq         uint64       `json:"last_seq"`
 }
 
 // Snapshot returns the session's current externally visible state in a
@@ -89,17 +95,18 @@ func (s *Session) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return Status{
-		ID:        s.ID,
-		Workdir:   s.Workdir,
-		Model:     s.Model,
-		Effort:    s.Effort,
-		AuthMode:  s.AuthMode,
-		State:     s.State(),
-		CreatedAt: s.CreatedAt,
-		StartedAt: s.StartedAt,
-		StoppedAt: s.StoppedAt,
-		ExitCode:  s.ExitCode,
-		LastSeq:   s.bus.LastSeq(),
+		ID:              s.ID,
+		Workdir:         s.Workdir,
+		Model:           s.Model,
+		Effort:          s.Effort,
+		AuthMode:        s.AuthMode,
+		ClaudeSessionID: s.ClaudeSessionID,
+		State:           s.State(),
+		CreatedAt:       s.CreatedAt,
+		StartedAt:       s.StartedAt,
+		StoppedAt:       s.StoppedAt,
+		ExitCode:        s.ExitCode,
+		LastSeq:         s.bus.LastSeq(),
 	}
 }
 

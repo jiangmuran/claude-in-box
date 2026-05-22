@@ -135,6 +135,18 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resume: the value the client sends is normally cib's session UUID
+	// (it's what we expose in /api/sessions). claude itself indexes its
+	// transcripts by its OWN session_id which we captured in the prior
+	// session's metadata. Translate cib → claude here so the user can
+	// just pick from the sessions list without knowing claude internals.
+	resumeFrom := req.ResumeFrom
+	if resumeFrom != "" {
+		if prior, ok := s.cfg.Sessions.Get(resumeFrom); ok && prior.ClaudeSessionID != "" {
+			resumeFrom = prior.ClaudeSessionID
+		}
+	}
+
 	spawnOpts := session.SpawnOptions{
 		Workdir:           req.Workdir,
 		Model:             req.Model,
@@ -142,7 +154,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		AuthMode:          authMode,
 		APIKey:            apiKey,
 		OAuthToken:        oauth,
-		ResumeFrom:        req.ResumeFrom,
+		ResumeFrom:        resumeFrom,
 		BypassPermissions: bypass,
 	}
 	if s.providerHost != "" {

@@ -7,6 +7,14 @@ import (
 	"time"
 
 	"github.com/jiangmuran/claude-in-box/internal/clauth"
+	"github.com/jiangmuran/claude-in-box/internal/prefs"
+)
+
+// prefsAuthSubscription / prefsAuthAPI are the pref deltas applied by
+// the mutual-exclusion side of the auth flow.
+var (
+	prefsAuthSubscription = prefs.Prefs{DefaultAuthMode: "subscription"}
+	prefsAuthAPI          = prefs.Prefs{DefaultAuthMode: "api_key"}
 )
 
 // --- handlers ---------------------------------------------------------------
@@ -96,6 +104,18 @@ func (s *Server) claudeAuthCode(w http.ResponseWriter, r *http.Request) {
 			"snapshot":  flow.Snapshot(),
 		})
 		return
+	}
+	// Mutual-exclusion: a successful subscription login wipes any
+	// configured third-party API providers so the next session can't
+	// accidentally bill against an API key. Best-effort — failure here
+	// must not unwind the login itself.
+	if s.cfg.Providers != nil {
+		for _, p := range s.cfg.Providers.List() {
+			_ = s.cfg.Providers.Delete(p.ID)
+		}
+	}
+	if s.cfg.Prefs != nil {
+		_ = s.cfg.Prefs.Patch(prefsAuthSubscription)
 	}
 	writeJSON(w, http.StatusOK, flow.Snapshot())
 }

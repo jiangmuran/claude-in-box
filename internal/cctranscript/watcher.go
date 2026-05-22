@@ -39,6 +39,12 @@ type Watcher struct {
 	Bus  Publisher
 	Poll time.Duration // default 150 ms
 
+	// OnInit is invoked once when we first see a `system.init` line in
+	// the JSONL. Carries claude's internal session_id (different from
+	// cib's session id; we need it for --resume) plus model + workdir.
+	// Optional; nil = ignore.
+	OnInit func(claudeSessionID, model, workdir string)
+
 	// toolNames caches { tool_use_id -> tool_name } so we can join
 	// tool_use blocks (from assistant turns) to their tool_result blocks
 	// (which arrive later in user turns).
@@ -258,6 +264,9 @@ func (w *Watcher) emit(line []byte) {
 				"permissionMode": e.PermissionMode,
 				"note":           "claude session init",
 			})
+			if w.OnInit != nil && e.SessionID != "" {
+				w.OnInit(e.SessionID, e.Model, e.Cwd)
+			}
 		}
 
 	case "assistant":

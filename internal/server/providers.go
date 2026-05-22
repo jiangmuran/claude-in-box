@@ -39,8 +39,27 @@ func (s *Server) addProvider(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Mutual-exclusion: adding an api_key provider wipes the
+	// container's claude.ai subscription credentials so the next
+	// session can't accidentally use them. Idempotent if no creds.
+	s.switchAuthToAPIKey(r.Context())
 	// Return the public shape so the UI does not echo the key back.
 	writeJSON(w, http.StatusCreated, p.Public())
+}
+
+// switchAuthToAPIKey runs Logout (best-effort) + flips
+// prefs.DefaultAuthMode = "api_key". Used by the addProvider and
+// replaceProvider handlers to enforce the user's "configuring an API
+// key wipes the subscription" rule.
+func (s *Server) switchAuthToAPIKey(ctx context.Context) {
+	if s.cfg.ClaudeAuth != nil {
+		lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_ = s.cfg.ClaudeAuth.Logout(lctx)
+		cancel()
+	}
+	if s.cfg.Prefs != nil {
+		_ = s.cfg.Prefs.Patch(prefsAuthAPI)
+	}
 }
 
 func (s *Server) replaceProvider(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +81,7 @@ func (s *Server) replaceProvider(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.switchAuthToAPIKey(r.Context())
 	writeJSON(w, http.StatusOK, p.Public())
 }
 

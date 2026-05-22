@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { todos, usage, status, frames } from '../lib/stores'
+  import { todos, usage, status, frames, sessions, activeSessionId } from '../lib/stores'
   import { T } from '../lib/i18n'
-  import type { Frame, TodoItem } from '../lib/types'
+  import type { TodoItem } from '../lib/types'
 
   type ToolCall = { seq: number; tool: string; durationMs?: number; error?: string; ok: boolean }
   let toolCalls = $derived.by((): ToolCall[] => {
@@ -29,6 +29,36 @@
   let u = $derived($usage as { input?: number; output?: number; cache_read?: number; cache_write?: number } | null)
   let st = $derived($status)
 
+  // Aggregate token totals across all usage frames in the session, plus
+  // the latest meta frame for live model name (the session.Model is set
+  // at create; claude /model command updates this meta frame).
+  type Totals = { in: number; out: number; cacheRead: number; calls: number }
+  let totals = $derived.by((): Totals => {
+    const t: Totals = { in: 0, out: 0, cacheRead: 0, calls: 0 }
+    for (const f of $frames) {
+      if (f.kind === 'usage') {
+        const d = f.data as { input?: number; output?: number; cache_read?: number }
+        t.in        += d?.input ?? 0
+        t.out       += d?.output ?? 0
+        t.cacheRead += d?.cache_read ?? 0
+      } else if (f.kind === 'tool.use.start') {
+        t.calls += 1
+      }
+    }
+    return t
+  })
+
+  let activeSess = $derived($sessions.find((s) => s.id === $activeSessionId) || null)
+  let liveModel = $derived.by((): string => {
+    for (let i = $frames.length - 1; i >= 0; i--) {
+      const f = $frames[i]
+      if (f.kind !== 'meta') continue
+      const d = f.data as { model?: string }
+      if (d?.model) return d.model
+    }
+    return (activeSess?.model as string) || ''
+  })
+
   function badgeColor(s?: TodoItem['status']) {
     if (s === 'completed') return 'tick-done'
     if (s === 'in_progress') return 'tick-doing'
@@ -37,6 +67,26 @@
 </script>
 
 <div class="rail-inner">
+  <section class="monitor">
+    <span class="divider">{$T('monitor', '运行状态')}</span>
+    <dl class="kv">
+      <dt>{$T('model', '模型')}</dt>
+      <dd class="mono">{liveModel || '—'}</dd>
+      <dt>{$T('effort', '思考深度')}</dt>
+      <dd class="mono">{(activeSess as { effort?: string })?.effort || $T('auto', '自动')}</dd>
+      <dt>{$T('tokens · in', '输入')}</dt>
+      <dd class="mono">{totals.in}</dd>
+      <dt>{$T('tokens · out', '输出')}</dt>
+      <dd class="mono">{totals.out}</dd>
+      {#if totals.cacheRead}
+        <dt>{$T('tokens · cache', '缓存')}</dt>
+        <dd class="mono">{totals.cacheRead}</dd>
+      {/if}
+      <dt>{$T('tool calls', '工具调用')}</dt>
+      <dd class="mono">{totals.calls}</dd>
+    </dl>
+  </section>
+
   <section>
     <span class="divider">{$T('todos', '待办')}</span>
     <ul class="todos">
@@ -93,6 +143,16 @@
 </div>
 
 <style>
+  .monitor .kv {
+    margin: 0;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    column-gap: 0.75rem;
+    row-gap: 0.25rem;
+    font-size: 12px;
+  }
+  .monitor .kv dt { color: var(--ink-3); font-family: var(--font-display); }
+  .monitor .kv dd { margin: 0; color: var(--ink); text-align: right; word-break: break-all; }
   .rail-inner {
     display: flex;
     flex-direction: column;

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api'
   import { T } from '../lib/i18n'
+  import SlashPalette from './SlashPalette.svelte'
 
   interface Props { sessionId: string; disabled: boolean }
   let { sessionId, disabled }: Props = $props()
@@ -9,6 +10,22 @@
   let busy = $state(false)
   let error = $state('')
   let ta = $state<HTMLTextAreaElement | null>(null)
+
+  // Slash command palette: open when the textarea starts with "/" and
+  // the caret is inside the leading slash-token. Filter by what comes
+  // after the slash.
+  let paletteQuery = $derived.by(() => {
+    const m = text.match(/^(\/\S*)/)
+    return m ? m[1] : ''
+  })
+  let paletteOpen = $derived(paletteQuery !== '')
+  function applyCmd(insert: string) {
+    // Replace the current /xxx token with the picked command + a space.
+    text = text.replace(/^\/\S*/, '') // drop the typed-so-far slash
+    text = insert + text.replace(/^\s*/, '')
+    resize()
+    ta?.focus()
+  }
 
   async function submit() {
     if (!text.trim()) return
@@ -56,6 +73,13 @@
 </script>
 
 <form class="bar" onsubmit={(e) => { e.preventDefault(); submit() }}>
+  {#if paletteOpen}
+    <SlashPalette
+      query={paletteQuery}
+      onpick={applyCmd}
+      onclose={() => (text = text.replace(/^\/\S*/, ''))}
+    />
+  {/if}
   <span class="prompt mono">›</span>
   <textarea
     bind:this={ta}
@@ -84,6 +108,7 @@
 
 <style>
   .bar {
+    position: relative;
     display: grid;
     grid-template-columns: auto 1fr auto;
     align-items: end;

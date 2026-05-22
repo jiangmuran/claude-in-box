@@ -95,6 +95,7 @@ func (m *Manager) Spawn(ctx context.Context, opts SpawnOptions) (*Session, error
 		ID:        id,
 		Workdir:   opts.Workdir,
 		Model:     opts.Model,
+		Effort:    opts.Effort,
 		AuthMode:  opts.AuthMode,
 		CreatedAt: time.Now().UTC(),
 		BaseDir:   dir,

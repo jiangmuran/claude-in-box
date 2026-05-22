@@ -32,6 +32,7 @@ type Session struct {
 	ID        string    `json:"id"`
 	Workdir   string    `json:"workdir"`
 	Model     string    `json:"model,omitempty"`
+	Effort    string    `json:"effort,omitempty"`
 	AuthMode  string    `json:"auth_mode,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	StartedAt time.Time `json:"started_at,omitempty"`
@@ -72,6 +73,7 @@ type Status struct {
 	ID        string       `json:"id"`
 	Workdir   string       `json:"workdir"`
 	Model     string       `json:"model,omitempty"`
+	Effort    string       `json:"effort,omitempty"`
 	AuthMode  string       `json:"auth_mode,omitempty"`
 	State     stream.State `json:"state"`
 	CreatedAt time.Time    `json:"created_at"`
@@ -90,6 +92,7 @@ func (s *Session) Status() Status {
 		ID:        s.ID,
 		Workdir:   s.Workdir,
 		Model:     s.Model,
+		Effort:    s.Effort,
 		AuthMode:  s.AuthMode,
 		State:     s.State(),
 		CreatedAt: s.CreatedAt,

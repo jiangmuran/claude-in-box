@@ -136,6 +136,17 @@ func (s *Server) anthropicRunTurn(r *http.Request, req *anthropicRequest) (*anth
 	if err := waitForClaudeReady(ctx, sess, 30*time.Second); err != nil {
 		return nil, http.StatusGatewayTimeout, fmt.Errorf("ready: %w", err)
 	}
+	// The first transcript line that carries a sessionId (last-prompt
+	// or permission-mode) fires BEFORE claude has finished painting the
+	// welcome banner and accepting keystrokes on the prompt line.
+	// Without this settle, the write below races and the prompt is
+	// swallowed. Empirical: 2s suffices on the test box; 3s is the
+	// safety margin.
+	select {
+	case <-time.After(3 * time.Second):
+	case <-ctx.Done():
+		return nil, http.StatusGatewayTimeout, fmt.Errorf("ready: ctx cancelled")
+	}
 
 	out, _, runErr := WaitForTurn(ctx, sess, prompt, 2*time.Minute)
 	if runErr != nil {

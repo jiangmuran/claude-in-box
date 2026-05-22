@@ -58,6 +58,14 @@ export const api = {
   // sessions
   listSessions: () => req<{ sessions: Session[] }>('GET', '/api/sessions'),
   getSession:   (id: string) => req<Session>('GET', `/api/sessions/${id}`),
+
+  // Port mapping — expose an in-container service on a pre-allocated
+  // host port (CIB_PORT_RANGE on docker run).
+  listPorts: () => req<{ range: [number, number]; mappings: { host_port: number; internal_port: number; internal_host?: string; created_at: string }[] }>('GET', '/api/ports'),
+  exposePort: (internalPort: number, internalHost?: string) =>
+    req<{ host_port: number; internal_port: number; internal_host: string; created_at: string }>('POST', '/api/ports/expose', { internal_port: internalPort, internal_host: internalHost }),
+  unexposePort: (hostPort: number) => req<void>('DELETE', `/api/ports/${hostPort}`),
+
   createSession: (opts: {
     workdir?: string
     model?: string

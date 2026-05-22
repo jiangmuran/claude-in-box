@@ -8,10 +8,11 @@
   import SessionsView from '../components/SessionsView.svelte'
   import ShellsView from '../components/ShellsView.svelte'
   import FilesView from '../components/FilesView.svelte'
+  import PortsView from '../components/PortsView.svelte'
   import ClaudeLoginModal from '../components/ClaudeLoginModal.svelte'
   import type { ClaudeAuthStatus } from '../lib/types'
 
-  type Tab = 'sessions' | 'shells' | 'files'
+  type Tab = 'sessions' | 'shells' | 'files' | 'ports'
   let tab = $state<Tab>('sessions')
 
   let claudeAuth = $state<ClaudeAuthStatus | null>(null)
@@ -43,6 +44,10 @@
         <span class="lbl">{$T('files', '文件')}</span>
         <span class="sub mono">view / edit</span>
       </button>
+      <button class="tab" class:active={tab === 'ports'} onclick={() => (tab = 'ports')}>
+        <span class="lbl">{$T('ports', '端口')}</span>
+        <span class="sub mono">expose host</span>
+      </button>
     </nav>
 
     <div class="rightside">
@@ -71,8 +76,10 @@
       <SessionsView />
     {:else if tab === 'shells'}
       <ShellsView />
-    {:else}
+    {:else if tab === 'files'}
       <FilesView />
+    {:else if tab === 'ports'}
+      <PortsView />
     {/if}
   </div>
 </div>

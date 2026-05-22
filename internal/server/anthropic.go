@@ -186,11 +186,9 @@ func (s *Server) anthropicRunTurn(r *http.Request, req *anthropicRequest) (*anth
 	return resp, http.StatusOK, nil
 }
 
-// anthropicMessagesStream emits an SSE event stream that matches
-// Anthropic's wire format closely enough for SDK consumers. We run the
-// full turn synchronously, then emit a single content_block_delta with
-// the whole text — incremental token-by-token streaming is on the
-// roadmap (would require chunking text.delta frames live).
+// anthropicMessagesStream runs a turn AND streams each text.delta frame
+// as a `content_block_delta` SSE event the moment it lands — token-by-
+// token incremental rendering, the way Anthropic's own API streams.
 func (s *Server) anthropicMessagesStream(w http.ResponseWriter, r *http.Request, req *anthropicRequest) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -203,38 +201,156 @@ func (s *Server) anthropicMessagesStream(w http.ResponseWriter, r *http.Request,
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	resp, _, err := s.anthropicRunTurn(r, req)
-	if err != nil {
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", marshalJSON(map[string]any{
-			"type":  "error",
-			"error": map[string]any{"type": "api_error", "message": err.Error()},
-		}))
-		flusher.Flush()
-		return
-	}
 	emit := func(event string, data any) {
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, marshalJSON(data))
 		flusher.Flush()
 	}
+	emitErr := func(msg string) {
+		emit("error", map[string]any{
+			"type":  "error",
+			"error": map[string]any{"type": "api_error", "message": msg},
+		})
+	}
+
+	prompt, err := renderMessagesAsPrompt(req.System, req.Messages)
+	if err != nil {
+		emitErr(err.Error())
+		return
+	}
+	authMode := ""
+	if s.cfg.Prefs != nil {
+		authMode = s.cfg.Prefs.Get().DefaultAuthMode
+	}
+	if authMode == "" {
+		authMode = "subscription"
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+	sess, err := s.cfg.Sessions.Spawn(ctx, session.SpawnOptions{
+		Workdir:           "/workspace",
+		Model:             req.Model,
+		AuthMode:          authMode,
+		BypassPermissions: true,
+	})
+	if err != nil {
+		emitErr(fmt.Sprintf("spawn: %v", err))
+		return
+	}
+	defer func() { _ = sess.Kill(syscall.SIGTERM) }()
+
+	if err := waitForClaudeReady(ctx, sess, 30*time.Second); err != nil {
+		emitErr(fmt.Sprintf("ready: %v", err))
+		return
+	}
+	select {
+	case <-time.After(3 * time.Second):
+	case <-ctx.Done():
+		emitErr("ready: ctx cancelled")
+		return
+	}
+
+	id := "msg_" + randHex(12)
+	model := req.Model
+	if sess.Model != "" {
+		model = sess.Model
+	}
+
+	// Open Anthropic's preamble events.
 	emit("message_start", map[string]any{
-		"type":    "message_start",
-		"message": map[string]any{"id": resp.ID, "type": "message", "role": "assistant", "model": resp.Model, "content": []any{}, "usage": resp.Usage},
+		"type": "message_start",
+		"message": map[string]any{
+			"id": id, "type": "message", "role": "assistant",
+			"model": model, "content": []any{},
+			"usage": map[string]any{"input_tokens": approxTokens(prompt), "output_tokens": 0},
+		},
 	})
 	emit("content_block_start", map[string]any{
-		"type":          "content_block_start",
-		"index":         0,
+		"type":  "content_block_start",
+		"index": 0,
 		"content_block": map[string]any{"type": "text", "text": ""},
 	})
-	emit("content_block_delta", map[string]any{
-		"type":  "content_block_delta",
-		"index": 0,
-		"delta": map[string]any{"type": "text_delta", "text": resp.Content[0].Text},
-	})
+
+	// Subscribe BEFORE writing so we don't miss the first text.delta.
+	startSeq := sess.LastSeq()
+	sub := sess.Bus().Subscribe(ctx, startSeq, 512)
+	defer sub.Cancel()
+	if _, werr := sess.Write([]byte(normalizePromptForCR(prompt))); werr != nil {
+		emitErr(fmt.Sprintf("write: %v", werr))
+		return
+	}
+
+	var assistantText strings.Builder
+	turnDone := false
+	for !turnDone {
+		select {
+		case <-ctx.Done():
+			emitErr("turn timeout")
+			return
+		case f, ok := <-sub.Frames():
+			if !ok {
+				turnDone = true
+				break
+			}
+			switch f.Kind {
+			case stream.KindTextDelta:
+				var d struct {
+					Role string `json:"role"`
+					Text string `json:"text"`
+				}
+				if json.Unmarshal(f.Data, &d) != nil {
+					continue
+				}
+				if d.Role != "assistant" || d.Text == "" {
+					continue
+				}
+				assistantText.WriteString(d.Text)
+				emit("content_block_delta", map[string]any{
+					"type":  "content_block_delta",
+					"index": 0,
+					"delta": map[string]any{"type": "text_delta", "text": d.Text},
+				})
+			case stream.KindStop:
+				// 400ms drain so trailing text.delta (cctranscript lag) lands.
+				drain := time.NewTimer(400 * time.Millisecond)
+				for draining := true; draining; {
+					select {
+					case <-drain.C:
+						draining = false
+					case f2, ok2 := <-sub.Frames():
+						if !ok2 {
+							draining = false
+							break
+						}
+						if f2.Kind == stream.KindTextDelta {
+							var d struct {
+								Role string `json:"role"`
+								Text string `json:"text"`
+							}
+							if json.Unmarshal(f2.Data, &d) == nil && d.Role == "assistant" && d.Text != "" {
+								assistantText.WriteString(d.Text)
+								emit("content_block_delta", map[string]any{
+									"type":  "content_block_delta",
+									"index": 0,
+									"delta": map[string]any{"type": "text_delta", "text": d.Text},
+								})
+							}
+						}
+					case <-ctx.Done():
+						draining = false
+					}
+				}
+				drain.Stop()
+				turnDone = true
+			}
+		}
+	}
+
+	// Anthropic's close events.
 	emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
 	emit("message_delta", map[string]any{
 		"type":  "message_delta",
-		"delta": map[string]any{"stop_reason": resp.StopReason, "stop_sequence": nil},
-		"usage": map[string]any{"output_tokens": resp.Usage.OutputTokens},
+		"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
+		"usage": map[string]any{"output_tokens": approxTokens(assistantText.String())},
 	})
 	emit("message_stop", map[string]any{"type": "message_stop"})
 }

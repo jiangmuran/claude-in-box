@@ -197,11 +197,10 @@ Content-Type: application/json
 ```
 
 `stream: true` switches to SSE with `message_start` → `content_block_start`
-→ `content_block_delta` → `content_block_stop` → `message_delta` →
-`message_stop` events. The first cut emits the full text in a single
-`content_block_delta`; true incremental token-by-token streaming is a
-follow-up. The SSE format matches Anthropic closely enough that the
-official SDKs consume it without modification.
+→ `content_block_delta` (one per assistant chunk, live as cctranscript
+captures it) → `content_block_stop` → `message_delta` → `message_stop`
+events. Token-by-token incremental streaming — the SDK's
+`messages.stream()` iterator yields each delta as it lands.
 
 Auth picks up cib's active mode (subscription vs api_key — set via the
 sign-in modal). The `/v1/messages` caller does not need to know which.

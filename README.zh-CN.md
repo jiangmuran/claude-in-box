@@ -238,38 +238,6 @@ docker run -d --restart unless-stopped \
 
 在单片机上实现 AES 信封传输:见 [`docs/AES-TRANSPORT.md`](docs/AES-TRANSPORT.md)。
 
-## Roadmap
-
-**M1 —— 完整无 UI 后端:**
-
-- [ ] 基础 Docker 镜像(Debian-slim + Node + Python + Go + Rust + claude-code),单 tag,多架构(amd64 + arm64)
-- [ ] Session manager:spawn / attach / detach / kill / resume,PTY 驱动,默认 bypass-permission,CC 仅 interactive
-- [ ] 运行中切换模型(`/model`)
-- [ ] Hooks runtime:镜像 / 用户 / 会话级合并,控制面 http hook 按会话注入
-- [ ] 结构化事件流(见上表)
-- [ ] Web API:bearer token、设备级 token、scope
-- [ ] REST + WS + SSE 同一端口多路复用,`?from=<seq>` 断点续传
-- [ ] 嵌入式客户端用的 AES 信封 HTTP 传输(`/aes/*`)
-- [ ] 透明 SOCKS5(redsocks + nftables)
-- [ ] `CIB_MODE=headless` runtime 开关,只暴露 API
-- [ ] 多架构 CI 推送到 GHCR
-- [ ] C 参考客户端 + ESP32-IDF 示例
-
-**M2 —— Web UI:**
-
-- [ ] 同会话三视图并行(原生终端 / 网页 Claude 驱动 / API 检视器)
-- [ ] 会话侧栏、模型选择器、hook 编辑器、MCP server 配置 CRUD
-- [ ] 移动端响应式
-
-**M3 —— 格式适配器与鉴权延伸:**
-
-- [ ] Anthropic 兼容 API(`/v1/messages`、流式)
-- [ ] OpenAI 兼容 API(`/openai/v1/chat/completions`)
-- [ ] 容器内交互式 `claude /login` OAuth 流
-- [ ] 多用户 `~/.claude` 隔离
-- [ ] OIDC(反代头信任)
-- [ ] MQTT 桥、原始 TCP 帧传输
-- [ ] AES 信封的 Rust / Python 参考客户端
 
 ## 贡献
 

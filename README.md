@@ -244,38 +244,6 @@ Behind HTTPS via nginx: see [`deploy/nginx.conf.template`](deploy/nginx.conf.tem
 
 Implementing the AES envelope on a microcontroller: see [`docs/AES-TRANSPORT.md`](docs/AES-TRANSPORT.md).
 
-## Roadmap
-
-**M1 — headless backend, complete:**
-
-- [ ] Base Docker image (Debian-slim + Node + Python + Go + Rust + claude-code), single tag, multi-arch (amd64 + arm64)
-- [ ] Session manager: spawn, attach, detach, kill, resume, PTY-backed, bypass-permission default, interactive CC only
-- [ ] Mid-session model switching via `/model`
-- [ ] Hooks runtime: image / user / session-level merge, control-plane http hooks installed per session
-- [ ] Structured event stream (frame schema as tabled above)
-- [ ] Web API: bearer token, device tokens, scopes
-- [ ] REST + WS + SSE multiplexed on one port, `?from=<seq>` resumption
-- [ ] AES envelope HTTP transport for embedded clients (`/aes/*`)
-- [ ] Transparent SOCKS5 via redsocks plus nftables
-- [ ] `CIB_MODE=headless` runtime switch for API-only deployments
-- [ ] Multi-arch CI build to GHCR
-- [ ] C reference client and ESP32-IDF demo
-
-**M2 — Web UI:**
-
-- [ ] Three concurrent views per session (raw terminal, web Claude driver, API inspector)
-- [ ] Session sidebar, model picker, hook editor, MCP server config CRUD
-- [ ] Mobile-responsive layout
-
-**M3 — format adapters and auth stretch:**
-
-- [ ] Anthropic-compatible API (`/v1/messages`, streaming)
-- [ ] OpenAI-compatible API (`/openai/v1/chat/completions`)
-- [ ] In-container interactive `claude /login` OAuth flow
-- [ ] Multi-tenant `~/.claude` isolation per device-token-owner
-- [ ] OIDC via reverse-proxy header trust
-- [ ] MQTT bridge, raw-TCP framed transport
-- [ ] Rust and Python reference clients for AES envelope
 
 ## Contributing
 

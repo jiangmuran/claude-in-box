@@ -1,11 +1,16 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/jiangmuran/claude-in-box/internal/session"
+	"github.com/jiangmuran/claude-in-box/internal/stream"
 )
 
 // /openai/v1/chat/completions — OpenAI Chat Completions compatibility.
@@ -72,9 +77,12 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Translate to Anthropic shape, then run through the existing pipeline.
-	antReq, sys := openAIToAnthropic(&req)
-	antReq.Stream = false // we'll wrap the stream ourselves
+	antReq, _ := openAIToAnthropic(&req)
+	if req.Stream {
+		s.openaiChatStream(w, r, antReq)
+		return
+	}
+	antReq.Stream = false
 
 	out, code, err := s.anthropicRunTurn(r, antReq)
 	if err != nil {
@@ -83,8 +91,6 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	_ = sys
-
 	text := ""
 	if len(out.Content) > 0 {
 		text = out.Content[0].Text
@@ -105,18 +111,14 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			TotalTokens:      out.Usage.InputTokens + out.Usage.OutputTokens,
 		},
 	}
-
-	if req.Stream {
-		s.openaiChatStream(w, resp)
-		return
-	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// openaiChatStream emits the full reply as one OpenAI-shaped SSE chunk
-// plus a [DONE] terminator. Incremental token-by-token streaming is the
-// same follow-up as Anthropic's.
-func (s *Server) openaiChatStream(w http.ResponseWriter, resp *openAIChatResponse) {
+// openaiChatStream runs a session turn and emits one
+// chat.completion.chunk per assistant text.delta the moment it lands —
+// token-by-block incremental streaming so SDK iterators yield as data
+// arrives. Closes with `data: [DONE]\n\n`.
+func (s *Server) openaiChatStream(w http.ResponseWriter, r *http.Request, antReq *anthropicRequest) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, http.StatusInternalServerError, "streaming not supported")
@@ -127,44 +129,132 @@ func (s *Server) openaiChatStream(w http.ResponseWriter, resp *openAIChatRespons
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
+	id := "chatcmpl-" + randHex(12)
+	created := time.Now().Unix()
+
 	emit := func(v any) {
 		fmt.Fprintf(w, "data: %s\n\n", marshalJSON(v))
 		flusher.Flush()
 	}
-	// Role chunk
-	emit(map[string]any{
-		"id":      resp.ID,
-		"object":  "chat.completion.chunk",
-		"created": resp.Created,
-		"model":   resp.Model,
-		"choices": []any{map[string]any{
-			"index": 0,
-			"delta": map[string]any{"role": "assistant"},
-		}},
+	emitErr := func(msg string) {
+		emit(map[string]any{
+			"error": map[string]any{"type": "api_error", "message": msg},
+		})
+	}
+	chunk := func(delta map[string]any, finish any) map[string]any {
+		choice := map[string]any{"index": 0, "delta": delta}
+		if finish != nil {
+			choice["finish_reason"] = finish
+		}
+		return map[string]any{
+			"id":      id,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   antReq.Model,
+			"choices": []any{choice},
+		}
+	}
+
+	prompt, err := renderMessagesAsPrompt(antReq.System, antReq.Messages)
+	if err != nil {
+		emitErr(err.Error())
+		return
+	}
+	authMode := ""
+	if s.cfg.Prefs != nil {
+		authMode = s.cfg.Prefs.Get().DefaultAuthMode
+	}
+	if authMode == "" {
+		authMode = "subscription"
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+	sess, err := s.cfg.Sessions.Spawn(ctx, session.SpawnOptions{
+		Workdir:           "/workspace",
+		Model:             antReq.Model,
+		AuthMode:          authMode,
+		BypassPermissions: true,
 	})
-	// Content chunk
-	emit(map[string]any{
-		"id":      resp.ID,
-		"object":  "chat.completion.chunk",
-		"created": resp.Created,
-		"model":   resp.Model,
-		"choices": []any{map[string]any{
-			"index": 0,
-			"delta": map[string]any{"content": resp.Choices[0].Message.Content},
-		}},
-	})
-	// Finish chunk
-	emit(map[string]any{
-		"id":      resp.ID,
-		"object":  "chat.completion.chunk",
-		"created": resp.Created,
-		"model":   resp.Model,
-		"choices": []any{map[string]any{
-			"index":         0,
-			"delta":         map[string]any{},
-			"finish_reason": "stop",
-		}},
-	})
+	if err != nil {
+		emitErr(fmt.Sprintf("spawn: %v", err))
+		return
+	}
+	defer func() { _ = sess.Kill(syscall.SIGTERM) }()
+	if err := waitForClaudeReady(ctx, sess, 30*time.Second); err != nil {
+		emitErr(fmt.Sprintf("ready: %v", err))
+		return
+	}
+	select {
+	case <-time.After(3 * time.Second):
+	case <-ctx.Done():
+		emitErr("ready: ctx cancelled")
+		return
+	}
+
+	// Open with the role chunk OpenAI clients expect.
+	emit(chunk(map[string]any{"role": "assistant"}, nil))
+
+	startSeq := sess.LastSeq()
+	sub := sess.Bus().Subscribe(ctx, startSeq, 512)
+	defer sub.Cancel()
+	if _, werr := sess.Write([]byte(normalizePromptForCR(prompt))); werr != nil {
+		emitErr(fmt.Sprintf("write: %v", werr))
+		return
+	}
+
+	turnDone := false
+	for !turnDone {
+		select {
+		case <-ctx.Done():
+			emitErr("turn timeout")
+			return
+		case f, ok := <-sub.Frames():
+			if !ok {
+				turnDone = true
+				break
+			}
+			switch f.Kind {
+			case stream.KindTextDelta:
+				var d struct {
+					Role string `json:"role"`
+					Text string `json:"text"`
+				}
+				if json.Unmarshal(f.Data, &d) != nil || d.Role != "assistant" || d.Text == "" {
+					continue
+				}
+				emit(chunk(map[string]any{"content": d.Text}, nil))
+			case stream.KindStop:
+				drain := time.NewTimer(400 * time.Millisecond)
+				for draining := true; draining; {
+					select {
+					case <-drain.C:
+						draining = false
+					case f2, ok2 := <-sub.Frames():
+						if !ok2 {
+							draining = false
+							break
+						}
+						if f2.Kind == stream.KindTextDelta {
+							var d struct {
+								Role string `json:"role"`
+								Text string `json:"text"`
+							}
+							if json.Unmarshal(f2.Data, &d) == nil && d.Role == "assistant" && d.Text != "" {
+								emit(chunk(map[string]any{"content": d.Text}, nil))
+							}
+						}
+					case <-ctx.Done():
+						draining = false
+					}
+				}
+				drain.Stop()
+				turnDone = true
+			}
+		}
+	}
+
+	// Finish chunk + OpenAI's [DONE] terminator.
+	emit(chunk(map[string]any{}, "stop"))
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
 }

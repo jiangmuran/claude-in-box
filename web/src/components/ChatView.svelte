@@ -2,10 +2,13 @@
   import { chatFrames } from '../lib/stores'
   import type { Frame } from '../lib/types'
 
-  // Collapse consecutive text.delta frames into single messages.
+  // Collapse consecutive same-role text.delta frames into single messages,
+  // mirroring claude-code-webui's UnifiedMessageProcessor turn handling.
   type Bubble =
-    | { type: 'text'; seq: number; text: string }
-    | { type: 'tool'; seq: number; tool: string; input?: unknown; result?: unknown; error?: string; durationMs?: number }
+    | { type: 'text'; seq: number; role: 'user' | 'assistant'; text: string }
+    | { type: 'thinking'; seq: number; text: string }
+    | { type: 'tool'; seq: number; toolUseId?: string; tool: string; input?: unknown; result?: unknown; error?: string; isError?: boolean; durationMs?: number }
+    | { type: 'todo'; seq: number; items: { subject: string; status: string; activeForm?: string }[] }
     | { type: 'ask'; seq: number; prompt: string; options: { label: string; description?: string }[]; multi: boolean }
     | { type: 'meta'; seq: number; note: string }
 
@@ -14,32 +17,63 @@
     let buf: Bubble | null = null
     function flush() { if (buf) { out.push(buf); buf = null } }
 
+    // Tool join cache: tool_use_id → bubble index in `out`, so a late
+    // tool.use.result can hydrate the original tool bubble even if other
+    // bubbles slid in between.
+    const toolIdx = new Map<string, number>()
+
     for (const f of frames) {
       switch (f.kind) {
         case 'text.delta': {
-          const text = (f.data as { text?: string })?.text ?? ''
-          if (buf && buf.type === 'text') buf.text += text
-          else { flush(); buf = { type: 'text', seq: f.seq, text } }
+          const d = f.data as { text?: string; role?: 'user' | 'assistant' }
+          const text = d?.text ?? ''
+          const role = (d?.role === 'user' ? 'user' : 'assistant')
+          if (buf && buf.type === 'text' && buf.role === role) {
+            buf.text += text
+          } else {
+            flush()
+            buf = { type: 'text', seq: f.seq, role, text }
+          }
+          break
+        }
+        case 'thinking': {
+          flush()
+          const d = f.data as { text?: string }
+          out.push({ type: 'thinking', seq: f.seq, text: d?.text ?? '' })
           break
         }
         case 'tool.use.start': {
           flush()
-          const d = f.data as { tool?: string; input?: unknown }
-          buf = { type: 'tool', seq: f.seq, tool: d?.tool ?? 'tool', input: d?.input }
+          const d = f.data as { tool?: string; input?: unknown; tool_use_id?: string }
+          const b: Bubble = { type: 'tool', seq: f.seq, toolUseId: d?.tool_use_id, tool: d?.tool ?? 'tool', input: d?.input }
+          out.push(b)
+          if (d?.tool_use_id) toolIdx.set(d.tool_use_id, out.length - 1)
           break
         }
         case 'tool.use.result': {
-          // attach to the most recent tool bubble (or open a fresh one).
-          const d = f.data as { tool?: string; output?: unknown; error?: string; duration_ms?: number }
-          if (buf && buf.type === 'tool') {
-            buf.result = d?.output
-            buf.error = d?.error
-            buf.durationMs = d?.duration_ms
-            flush()
+          flush()
+          const d = f.data as { tool?: string; output?: unknown; error?: string; is_error?: boolean; duration_ms?: number; tool_use_id?: string }
+          const at = d?.tool_use_id ? toolIdx.get(d.tool_use_id) : undefined
+          if (at != null && out[at]?.type === 'tool') {
+            const t = out[at] as Extract<Bubble, { type: 'tool' }>
+            t.result = d?.output
+            t.error = d?.error
+            t.isError = d?.is_error
+            t.durationMs = d?.duration_ms
           } else {
-            flush()
-            out.push({ type: 'tool', seq: f.seq, tool: d?.tool ?? 'tool', result: d?.output, error: d?.error, durationMs: d?.duration_ms })
+            out.push({ type: 'tool', seq: f.seq, toolUseId: d?.tool_use_id, tool: d?.tool ?? 'tool', result: d?.output, error: d?.error, isError: d?.is_error, durationMs: d?.duration_ms })
           }
+          break
+        }
+        case 'todo.update': {
+          flush()
+          const d = f.data as { items?: { subject?: string; content?: string; status?: string; activeForm?: string }[] }
+          const items = (d?.items ?? []).map((t) => ({
+            subject: t.subject ?? t.content ?? '',
+            status: t.status ?? 'pending',
+            activeForm: t.activeForm,
+          }))
+          out.push({ type: 'todo', seq: f.seq, items })
           break
         }
         case 'ask.question': {
@@ -51,7 +85,8 @@
         case 'meta': {
           flush()
           const d = f.data as { note?: string; model?: string }
-          out.push({ type: 'meta', seq: f.seq, note: d?.note ?? (d?.model ? `model · ${d.model}` : '—') })
+          const note = d?.model ? `model · ${d.model}` : (d?.note ?? '—')
+          out.push({ type: 'meta', seq: f.seq, note })
           break
         }
         default: break
@@ -84,9 +119,29 @@
 
     {#each bubbles as b (b.seq)}
       {#if b.type === 'text'}
-        <article class="bubble text">
-          <div class="bubble-head"><span class="who">claude</span><span class="seq mono">#{b.seq}</span></div>
+        <article class="bubble text" class:user={b.role === 'user'} class:assistant={b.role === 'assistant'}>
+          <div class="bubble-head">
+            <span class="who">{b.role === 'user' ? 'you' : 'claude'}</span>
+            <span class="seq mono">#{b.seq}</span>
+          </div>
           <div class="bubble-body serif">{b.text}</div>
+        </article>
+      {:else if b.type === 'thinking'}
+        <article class="bubble thinking">
+          <div class="bubble-head"><span class="who">thinking</span><span class="seq mono">#{b.seq}</span></div>
+          <div class="bubble-body serif">{b.text}</div>
+        </article>
+      {:else if b.type === 'todo'}
+        <article class="bubble todo">
+          <div class="bubble-head"><span class="who">todos</span><span class="seq mono">#{b.seq}</span></div>
+          <ul class="todo-list">
+            {#each b.items as t, i (i)}
+              <li class={'todo-' + t.status}>
+                <span class="tick mono">{t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '⏵' : '·'}</span>
+                <span class="todo-text">{t.status === 'in_progress' && t.activeForm ? t.activeForm : t.subject}</span>
+              </li>
+            {/each}
+          </ul>
         </article>
       {:else if b.type === 'tool'}
         <article class="bubble tool" class:errored={b.error}>
@@ -188,6 +243,35 @@
     font-variation-settings: 'opsz' 14, 'SOFT' 70;
     white-space: pre-wrap;
   }
+
+  .bubble.text.user {
+    background: linear-gradient(180deg, rgba(217,119,87,0.10), rgba(217,119,87,0.04));
+    border-color: var(--coral);
+    margin-left: 2rem;
+  }
+  .bubble.text.user .who { color: var(--coral-deep); }
+  .bubble.text.assistant {
+    background: var(--cream);
+    margin-right: 2rem;
+  }
+
+  .bubble.thinking {
+    background: var(--cream-2);
+    border-color: var(--line);
+    border-style: dashed;
+  }
+  .bubble.thinking .who { color: var(--ink-3); }
+  .bubble.thinking .bubble-body { color: var(--ink-3); font-style: italic; font-size: 0.92rem; }
+
+  .bubble.todo { background: var(--cream-2); border-color: var(--line-strong); }
+  .bubble.todo .who { color: var(--coral-dark); }
+  .todo-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.3rem; }
+  .todo-list li { display: grid; grid-template-columns: 1.2rem 1fr; align-items: baseline; font-family: var(--font-mono); font-size: 13px; }
+  .todo-list .tick { color: var(--ink-faint); }
+  .todo-list .todo-completed { color: var(--ink-faint); text-decoration: line-through; }
+  .todo-list .todo-completed .tick { color: var(--ok); }
+  .todo-list .todo-in_progress { color: var(--coral-dark); }
+  .todo-list .todo-in_progress .tick { color: var(--coral); }
 
   .bubble.tool { background: var(--cream-2); border-color: var(--line-strong); }
   .tool-name { color: var(--ink-2); font-weight: 500; }

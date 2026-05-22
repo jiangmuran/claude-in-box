@@ -162,6 +162,56 @@ DELETE accepts `?signal=term` (default) or `?signal=kill`.
 Returns the full frame array (or every frame after a given `seq` —
 the resume cursor pattern for late-joining subscribers).
 
+### `GET /api/sessions/{id}/messages[?since=<seq>]`
+
+Chat-shaped aggregate of the same data, mirrored to what the Web UI
+renders. Each entry has a `type` discriminator:
+
+```jsonc
+[
+  { "seq": 12, "type": "text", "role": "user",      "text": "list files" },
+  { "seq": 18, "type": "tool", "tool": "Bash", "input": {...}, "output": ..., "tool_use_id": "..." },
+  { "seq": 19, "type": "todo", "items": [...] },
+  { "seq": 20, "type": "askq", "questions": [...] },
+  { "seq": 24, "type": "text", "role": "assistant", "text": "no files." },
+  { "seq": 28, "type": "usage", "input": 6, "output": 95 },
+  { "seq": 29, "type": "stop", "reason": "end_turn", "duration_ms": 1234 }
+]
+```
+
+Use this when you want the chat without parsing raw frames yourself.
+
+### `GET /api/sessions/{id}/chat[?since=<seq>]` — embedded-slim
+
+Same idea, payload trimmed to the minimum a small MCU (few hundred KB
+RAM, HTTP/1.1 only) can fit on the heap. Only carries user/assistant
+text and a one-line tool summary; thinking, todos, meta, usage and stop
+are dropped:
+
+```jsonc
+{
+  "session": "uuid",
+  "last_seq": 42,
+  "messages": [
+    { "seq": 12, "role": "user",      "text": "hi" },
+    { "seq": 18, "role": "tool",      "tool": "Bash", "summary": "ok · 17ms" },
+    { "seq": 24, "role": "assistant", "text": "hello" }
+  ]
+}
+```
+
+Mirrored over AES envelope as `POST /aes/sessions/{id}/chat` (body
+`{"since": <seq>}`). Polling pattern for embedded:
+
+```
+loop:
+  POST /aes/sessions/<id>/input  { "data": "your prompt\r" }
+  loop until session is idle:
+    POST /aes/sessions/<id>/chat { "since": last_seq }
+    render new messages, advance last_seq
+    sleep ~500 ms
+```
+
 ### `GET /ws/sessions/{id}[?from=<seq>]` — live frames
 
 WebSocket. Server pushes JSON text frames matching the `Frame` shape

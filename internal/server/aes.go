@@ -133,6 +133,45 @@ func jsonStringLiteral(s string) string {
 
 // -------- AES route handlers ------------------------------------------------
 
+// aesChat mirrors GET /api/sessions/:id/chat over the AES envelope.
+// Embedded-friendly slim chat shape; expects an envelope-encrypted JSON
+// body `{ "since": <seq> }` (since=0 returns the whole list).
+type aesChatRequest struct {
+	Since uint64 `json:"since,omitempty"`
+}
+
+func (s *Server) aesChat(w http.ResponseWriter, r *http.Request) {
+	plaintext, h, key, err := s.readEnvelope(r)
+	if err != nil {
+		var ae *aesError
+		if errors.As(err, &ae) {
+			writeAESError(w, ae.Status, ae.Code, ae.Detail)
+			return
+		}
+		writeAESError(w, http.StatusBadRequest, "BadEnvelope", err.Error())
+		return
+	}
+	id := r.PathValue("id")
+	sess, ok := s.cfg.Sessions.Get(id)
+	if !ok {
+		s.aesRespJSON(w, r, h, key, http.StatusNotFound, map[string]any{"error": "no such session"})
+		return
+	}
+	var req aesChatRequest
+	if len(plaintext) > 0 {
+		_ = json.Unmarshal(plaintext, &req)
+	}
+	msgs := aggregateChat(sess.Snapshot())
+	if req.Since > 0 {
+		msgs = filterSince(msgs, req.Since)
+	}
+	s.aesRespJSON(w, r, h, key, http.StatusOK, map[string]any{
+		"session":  sess.ID,
+		"last_seq": sess.LastSeq(),
+		"messages": msgs,
+	})
+}
+
 // aesInput mirrors POST /api/sessions/:id/input over the AES envelope.
 func (s *Server) aesInput(w http.ResponseWriter, r *http.Request) {
 	plaintext, h, key, err := s.readEnvelope(r)

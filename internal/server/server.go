@@ -97,6 +97,11 @@ func (s *Server) routes() {
 	// the raw frame stream themselves.
 	mux.Handle("GET /api/sessions/{id}/messages",
 		auth.Require(s.cfg.Tokens, auth.ScopeSessionsRead)(http.HandlerFunc(s.listMessages)))
+	// Embedded-friendly slim chat (user/assistant text + tool one-liners
+	// only; supports ?since=<seq> for incremental polling). Sized for
+	// MCU-class devices that can only afford a few hundred KB of heap.
+	mux.Handle("GET /api/sessions/{id}/chat",
+		auth.Require(s.cfg.Tokens, auth.ScopeSessionsRead)(http.HandlerFunc(s.chatMessages)))
 
 	// Streams.
 	mux.Handle("GET /ws/sessions/{id}",
@@ -120,6 +125,7 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /aes/keyinfo", s.aesKeyInfo)
 	mux.HandleFunc("POST /aes/sessions/{id}/input", s.aesInput)
 	mux.HandleFunc("POST /aes/sessions/{id}/events/poll", s.aesEventsPoll)
+	mux.HandleFunc("POST /aes/sessions/{id}/chat", s.aesChat)
 
 	// Shells (plain-bash PTYs alongside Claude Code sessions).
 	mux.Handle("GET /api/shells",

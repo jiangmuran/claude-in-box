@@ -15,6 +15,7 @@ import (
 	"github.com/jiangmuran/claude-in-box/internal/clauth"
 	"github.com/jiangmuran/claude-in-box/internal/fsapi"
 	"github.com/jiangmuran/claude-in-box/internal/hooks"
+	"github.com/jiangmuran/claude-in-box/internal/ports"
 	"github.com/jiangmuran/claude-in-box/internal/prefs"
 	"github.com/jiangmuran/claude-in-box/internal/providers"
 	"github.com/jiangmuran/claude-in-box/internal/session"
@@ -34,6 +35,7 @@ type Config struct {
 	Files      *fsapi.Manager   // may be nil — handlers return 503
 	Providers  *providers.Store // may be nil — handlers return 503
 	Prefs      *prefs.Store     // may be nil — handlers return 503
+	Ports      *ports.Manager   // may be nil — handlers return 503
 	AESReplay  *aespkg.ReplayCache
 
 	// Version, Commit are reported by /api/health and the placeholder index.
@@ -185,6 +187,15 @@ func (s *Server) routes() {
 		auth.Require(s.cfg.Tokens, auth.ScopePrefsRead)(http.HandlerFunc(s.getPrefs)))
 	mux.Handle("PATCH /api/prefs",
 		auth.Require(s.cfg.Tokens, auth.ScopePrefsWrite)(http.HandlerFunc(s.patchPrefs)))
+
+	// Port mapping — surface an in-container service on a host port from
+	// the pre-allocated range (CIB_PORT_RANGE on docker run).
+	mux.Handle("GET /api/ports",
+		auth.Require(s.cfg.Tokens, auth.ScopePortsRead)(http.HandlerFunc(s.listPorts)))
+	mux.Handle("POST /api/ports/expose",
+		auth.Require(s.cfg.Tokens, auth.ScopePortsWrite)(http.HandlerFunc(s.exposePort)))
+	mux.Handle("DELETE /api/ports/{host_port}",
+		auth.Require(s.cfg.Tokens, auth.ScopePortsWrite)(http.HandlerFunc(s.unexposePort)))
 
 	// Claude auth (in-container `claude auth login --claudeai`).
 	mux.Handle("GET /api/auth/claude/status",

@@ -97,6 +97,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       redis-server \
       postgresql postgresql-client \
       docker.io \
+      socat \
   && rm -rf /var/lib/apt/lists/*
 
 # Python stack via Debian packages so we honour PEP 668 cleanly.

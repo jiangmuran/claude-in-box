@@ -19,6 +19,8 @@ const (
 	ScopeProvidersWrite = "providers:write"
 	ScopePrefsRead      = "prefs:read"
 	ScopePrefsWrite     = "prefs:write"
+	ScopePortsRead      = "ports:read"
+	ScopePortsWrite     = "ports:write"
 	ScopeHooksRead     = "hooks:read"
 	ScopeHooksWrite    = "hooks:write"
 	ScopeTokensRead    = "tokens:read"
@@ -41,6 +43,8 @@ var AllScopes = []string{
 	ScopeProvidersWrite,
 	ScopePrefsRead,
 	ScopePrefsWrite,
+	ScopePortsRead,
+	ScopePortsWrite,
 	ScopeHooksRead,
 	ScopeHooksWrite,
 	ScopeTokensRead,

@@ -18,6 +18,7 @@ import (
 	"github.com/jiangmuran/claude-in-box/internal/auth"
 	"github.com/jiangmuran/claude-in-box/internal/clauth"
 	"github.com/jiangmuran/claude-in-box/internal/fsapi"
+	"github.com/jiangmuran/claude-in-box/internal/ports"
 	"github.com/jiangmuran/claude-in-box/internal/prefs"
 	"github.com/jiangmuran/claude-in-box/internal/providers"
 	"github.com/jiangmuran/claude-in-box/internal/server"
@@ -104,6 +105,10 @@ func run(addr, dataDir, claudeBin string) error {
 	if err != nil {
 		return fmt.Errorf("init prefs store: %w", err)
 	}
+	portsMgr, err := ports.NewManager(os.Getenv("CIB_PORT_RANGE"))
+	if err != nil {
+		return fmt.Errorf("init ports manager: %w", err)
+	}
 
 	srv := server.New(server.Config{
 		Mode:       mode,
@@ -114,6 +119,7 @@ func run(addr, dataDir, claudeBin string) error {
 		Files:      files,
 		Providers:  providersStore,
 		Prefs:      prefsStore,
+		Ports:      portsMgr,
 		Version:    version,
 		Commit:     commit,
 	})

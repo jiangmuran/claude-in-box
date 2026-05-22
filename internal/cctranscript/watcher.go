@@ -204,28 +204,37 @@ func HistoryReplay(path string, bus Publisher) error {
 
 // ---- translation -----------------------------------------------------------
 
-// rawEntry covers the union of claude transcript line shapes.
+// rawEntry covers the union of claude transcript line shapes (the real
+// on-disk schema in ~/.claude/projects/<hash>/<session>.jsonl — every
+// field name is camelCase, NOT snake_case, and the line types are NOT
+// the stream-json types: types observed include user, assistant,
+// system, last-prompt, permission-mode, attachment, ai-title,
+// file-history-snapshot).
 type rawEntry struct {
 	Type    string          `json:"type"`
 	Subtype string          `json:"subtype,omitempty"`
 	Message *struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
+		Model   string          `json:"model,omitempty"`
 		Usage   *struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-			CacheRead    int `json:"cache_read_input_tokens,omitempty"`
-			CacheCreate  int `json:"cache_creation_input_tokens,omitempty"`
+			InputTokens         int `json:"input_tokens"`
+			OutputTokens        int `json:"output_tokens"`
+			CacheReadInput      int `json:"cache_read_input_tokens,omitempty"`
+			CacheCreationInput  int `json:"cache_creation_input_tokens,omitempty"`
 		} `json:"usage,omitempty"`
 	} `json:"message,omitempty"`
 
-	// Top-level fields that appear on system.init and result.
-	Model         string          `json:"model,omitempty"`
-	SessionID     string          `json:"session_id,omitempty"`
-	Cwd           string          `json:"cwd,omitempty"`
-	Tools         json.RawMessage `json:"tools,omitempty"`
-	PermissionMode string         `json:"permissionMode,omitempty"`
+	// Every persistent-transcript line carries sessionId once claude
+	// has decided what it is. Some lines also carry cwd / permissionMode.
+	SessionID      string          `json:"sessionId,omitempty"`
+	Cwd            string          `json:"cwd,omitempty"`
+	PermissionMode string          `json:"permissionMode,omitempty"`
+	Tools          json.RawMessage `json:"tools,omitempty"`
 
+	// Result-style lines (legacy / --print mode); harmless on persistent
+	// transcripts where they don't appear.
+	Model        string  `json:"model,omitempty"`
 	DurationMs   int64   `json:"duration_ms,omitempty"`
 	TotalCostUSD float64 `json:"total_cost_usd,omitempty"`
 	IsError      bool    `json:"is_error,omitempty"`
@@ -252,6 +261,15 @@ func (w *Watcher) emit(line []byte) {
 	if err := json.Unmarshal(line, &e); err != nil {
 		return
 	}
+	// Capture sessionId from the FIRST line of any type that carries it.
+	// Persistent transcripts have no single "init" line — sessionId
+	// appears on user/assistant/system/last-prompt/permission-mode etc.
+	// alike. OnInit may fire once per watcher.
+	if w.OnInit != nil && e.SessionID != "" {
+		w.OnInit(e.SessionID, modelFromMessage(e), e.Cwd)
+		w.OnInit = nil // one-shot
+	}
+
 	switch e.Type {
 	case "system":
 		// system.init carries model + cwd + tools + permissionMode.
@@ -264,10 +282,13 @@ func (w *Watcher) emit(line []byte) {
 				"permissionMode": e.PermissionMode,
 				"note":           "claude session init",
 			})
-			if w.OnInit != nil && e.SessionID != "" {
-				w.OnInit(e.SessionID, e.Model, e.Cwd)
-			}
 		}
+	case "permission-mode":
+		_, _ = w.Bus.Publish("meta", map[string]any{
+			"permissionMode": e.PermissionMode,
+			"session_id":     e.SessionID,
+			"note":           "permission mode",
+		})
 
 	case "assistant":
 		if e.Message == nil {
@@ -278,8 +299,8 @@ func (w *Watcher) emit(line []byte) {
 			_, _ = w.Bus.Publish("usage", map[string]any{
 				"input":       e.Message.Usage.InputTokens,
 				"output":      e.Message.Usage.OutputTokens,
-				"cache_read":  e.Message.Usage.CacheRead,
-				"cache_write": e.Message.Usage.CacheCreate,
+				"cache_read":  e.Message.Usage.CacheReadInput,
+				"cache_write": e.Message.Usage.CacheCreationInput,
 			})
 		}
 
@@ -366,6 +387,18 @@ func (w *Watcher) emitContentBlocks(raw json.RawMessage, role string) {
 			})
 		}
 	}
+}
+
+// modelFromMessage extracts a model name from an entry's message block
+// (assistant messages on persistent transcripts carry `message.model`).
+func modelFromMessage(e rawEntry) string {
+	if e.Model != "" {
+		return e.Model
+	}
+	if e.Message != nil {
+		return e.Message.Model
+	}
+	return ""
 }
 
 func parseTodos(raw json.RawMessage) []map[string]string {

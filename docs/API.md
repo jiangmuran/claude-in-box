@@ -212,6 +212,68 @@ loop:
     sleep ~500 ms
 ```
 
+### `GET /sse/sessions/{id}/chat[?since=<seq>]` — true streaming for MCU
+
+Server-Sent Events stream of the slim chat shape. HTTP/1.1 chunked, no
+WebSocket upgrade, no JSON aggregation work — any line-by-line reader
+can consume it:
+
+```
+GET /sse/sessions/<id>/chat?since=12 HTTP/1.1
+Authorization: Bearer <TOKEN>
+Accept: text/event-stream
+```
+
+```
+id: 18
+event: chat
+data: {"seq":18,"role":"tool","tool":"Bash","summary":"running"}
+
+id: 18
+event: update
+data: {"seq":18,"role":"tool","tool":"Bash","summary":"ok · 17ms"}
+
+id: 24
+event: chat
+data: {"seq":24,"role":"assistant","text":"hello "}
+
+id: 24
+event: update
+data: {"seq":24,"role":"assistant","text":"hello world"}
+
+id: 29
+event: stop
+data: {"seq":29,"reason":"end_turn","duration_ms":1234}
+
+:heartbeat
+```
+
+- `event: chat` — a new message appeared (full record)
+- `event: update` — the previous message updated (typically assistant
+  text growing or tool result landing). Carries the full latest record;
+  client can blind-replace by `seq`.
+- `event: stop` — current turn ended.
+- `:heartbeat` — keepalive every ~25 s.
+- `id:` reflects the bus seq; pass back as `Last-Event-ID` (browsers do
+  this automatically) or `?since=N` to resume after a reconnect with no
+  gap.
+
+MCU receive loop (pseudo-C, fits in ~80 LoC with `mbedtls`):
+
+```c
+while (recv_line(line)) {
+    if (line.starts_with(":")) continue;             // heartbeat / comment
+    if (line.starts_with("event:")) cur_event = line+7;
+    if (line.starts_with("data:")) {
+        cur_data = line+6;
+        if (blank_line_follows()) {
+            handle(cur_event, cur_data);
+            cur_event = "";
+        }
+    }
+}
+```
+
 ### `GET /ws/sessions/{id}[?from=<seq>]` — live frames
 
 WebSocket. Server pushes JSON text frames matching the `Frame` shape

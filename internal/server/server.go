@@ -108,6 +108,10 @@ func (s *Server) routes() {
 		auth.Require(s.cfg.Tokens, auth.ScopeSessionsRead)(http.HandlerFunc(s.streamWS)))
 	mux.Handle("GET /sse/sessions/{id}",
 		auth.Require(s.cfg.Tokens, auth.ScopeSessionsRead)(http.HandlerFunc(s.streamSSE)))
+	// MCU-friendly: slim-chat events over SSE. Line-by-line consumable on
+	// any HTTP/1.1 client (no WS upgrade, no JSON aggregation work).
+	mux.Handle("GET /sse/sessions/{id}/chat",
+		auth.Require(s.cfg.Tokens, auth.ScopeSessionsRead)(http.HandlerFunc(s.chatStream)))
 
 	// Tokens.
 	mux.Handle("GET /api/tokens",

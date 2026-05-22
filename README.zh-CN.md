@@ -64,8 +64,8 @@
 8.  与 Claude 对话;中途随时切模型;todo、工具调用、状态从类型化事件流
     实时渲染到结构化视图里,而不是刮终端。
 9.  手机、平板、嵌入式 MCU 或别的 agent 都能连同一个会话,各自挑合适的
-    传输 + API 形态 —— 浏览器走 REST/WS,ESP32 走 AES 信封,现成 SDK 走
-    Anthropic / OpenAI 兼容 HTTP(规划中)。
+    传输 + API 形态 —— 浏览器走 REST/WS,ESP32 走 AES 信封或 SSE,现成
+    SDK 走 Anthropic / OpenAI 兼容 HTTP(已 ship —— 见 `docs/API.md`)。
 ```
 
 这就是 README 后面这些章节要讲清楚的整个闭环。
@@ -90,7 +90,9 @@
 |------|----------|------|
 | Anthropic 订阅(个人用户默认) | 已经付了 Claude Pro / Max,想走订阅。 | 在你自己电脑上跑 `claude setup-token` 拿到长 OAuth token;通过 `CLAUDE_CODE_OAUTH_TOKEN` env 或者 API 按会话注入容器。 |
 | API key | 程序化、CI、按 token 计费,或者一台 box 给多个人各自带 key。 | 容器上设 `ANTHROPIC_API_KEY`,或按会话注入。 |
-| 容器内 `claude /login` 交互登录 | 给不想折腾 `claude setup-token` 的用户。 | Roadmap (M3)。Web UI 会驱动一个 PTY 化的 `claude /login` + OAuth 回调流。 |
+| 容器内 `claude /login` 交互登录 | 给不想折腾 `claude setup-token` 的用户。 | **已 ship**。Web UI 统一鉴权 modal 端到端驱动 PTY-backed OAuth(start → 粘 code → finish)。 |
+| 第三方 Anthropic 兼容 host | 想指向 jmrai.net 或自己的代理(不同 `api_host` 但同 API)。 | 鉴权 modal 里内置 **jmrai.net 预设**(粘 key 保存即用),也支持自定义 host/key/label。 |
+| 互斥清除 | 订阅与 API key 不能同时活动。 | 配置 API provider 时擦除 claude.ai 凭据;走订阅登录时删除所有 providers。服务端强制。 |
 
 订阅计费能跑通,前提是 CC 在容器里保持 interactive REPL —— 见上一张表的对应条目。
 
@@ -128,8 +130,11 @@ Hooks 是一等公民。控制面在每个会话启动时安装自己的 `http` 
 | 原生帧 REST + WS | `/api/*`、`/ws/*` | 浏览器、手机、服务器、我们自己的 Web UI | TLS(nginx 终止) | Bearer token(主/设备级) | M1 |
 | 原生帧 SSE | `/sse/*` | 廉价单向客户端、日志拉取 | TLS(nginx 终止) | Bearer | M1 |
 | HTTP + AES 信封 | `/aes/*` | 没 TLS 栈的裸机 MCU(ESP32 / STM32) | AES-256-GCM 设备级密钥 | API key + 单请求 nonce | M1 |
-| Anthropic 兼容 API | `/v1/messages`、`/v1/messages?stream=true` | 已有 Claude SDK 客户端 —— base URL 指过来就能用 | TLS(nginx 终止) | Bearer / API key | M3(规划) |
-| OpenAI 兼容 API | `/openai/v1/chat/completions` | 已有 OpenAI SDK 客户端 | TLS(nginx 终止) | Bearer / API key | M3(规划) |
+| Anthropic 兼容 API | `/v1/messages`、`stream=true` SSE | 已有 Claude SDK 客户端 —— base URL 指过来就能用 | TLS(nginx 终止) | Bearer / API key | **已 ship**(per-request 临时 session,incremental SSE) |
+| OpenAI 兼容 API | `/openai/v1/chat/completions` | 已有 OpenAI SDK 客户端 | TLS(nginx 终止) | Bearer / API key | **已 ship**(per-request 临时 session,incremental SSE) |
+| 精简 chat(嵌入式) | `/api/sessions/{id}/chat` REST、`/sse/sessions/{id}/chat` SSE、`/aes/sessions/{id}/chat` over AES | 只有几百 KB RAM 的 MCU | TLS / AES 信封 | Bearer / AES key | **已 ship** |
+| 一发即等 | `POST /api/sessions/{id}/send` | 非流式客户端一次 HTTP 完成一回合 | TLS(nginx 终止) | Bearer | **已 ship** |
+| 端口映射 | `GET/POST/DELETE /api/ports/*` | 通过 socat 把容器内服务暴露到宿主端口 | TLS(nginx 终止) | Bearer | **已 ship**(`docker run` 时设 `CIB_PORT_RANGE`) |
 | MQTT 桥 | — | IoT 总线接入 | TLS 或预共享 | 按主题 | Roadmap |
 | 原始 TCP 帧 | — | 最小占用极限场景 | AES-GCM | API key | Roadmap |
 
@@ -156,7 +161,8 @@ HTTPS 部署提供 [nginx 配置模板](deploy/nginx.conf.template):终止 TLS�
 
 - AES 信封 HTTP 传输让一台只有 HTTP client + AES-GCM 实现的 ESP32 / STM32 / RP2040 也能当一等公民:给会话发输入、轮询结构化帧、对 todo/stop 做出反应。
 - 参考 C 客户端放在 [`clients/c/`](clients/)(mbedtls,~300 LOC),旁边附带一个 ESP-IDF 例子。
-- Rust / Python 参考客户端在 M3 跟上。
+- 参考 Python 客户端放在 [`clients/python/`](clients/python/)(~250 LOC,纯 stdlib + `cryptography`,带 5 个测试)。
+- Rust 参考客户端是下一项待办。
 
 ## 状态
 

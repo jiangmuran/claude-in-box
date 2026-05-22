@@ -102,12 +102,14 @@ func parseSinceQuery(r *http.Request) uint64 {
 	return n
 }
 
+// filterSince returns a freshly-allocated slice of messages whose `seq`
+// field is strictly greater than `since`. Never reuses the input
+// backing array — callers can keep `msgs` after this returns.
 func filterSince(msgs []map[string]any, since uint64) []map[string]any {
-	out := msgs[:0]
+	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
 		seq, _ := m["seq"].(uint64)
 		if seq == 0 {
-			// some downstream callers may have stamped seq as a number via json
 			if n, ok := m["seq"].(float64); ok {
 				seq = uint64(n)
 			} else if n, ok := m["seq"].(int); ok {
@@ -210,8 +212,6 @@ func aggregateMessages(frames []stream.Frame) []map[string]any {
 	out := make([]map[string]any, 0, len(frames))
 	toolIdx := map[string]int{} // tool_use_id → index in out
 
-	flushIfText := func(last *map[string]any) { _ = last }
-
 	for _, f := range frames {
 		switch f.Kind {
 		case stream.KindTextDelta:
@@ -232,8 +232,7 @@ func aggregateMessages(frames []stream.Frame) []map[string]any {
 					continue
 				}
 			}
-			out = append(out, map[string]any{"type": "text", "role": role, "text": d.Text, "seq": f.Seq})
-			flushIfText(nil)
+			out = append(out, map[string]any{"type": "text", "role": role, "text": d.Text, "seq": uint64(f.Seq)})
 
 		case "thinking":
 			var d struct{ Text string `json:"text"` }

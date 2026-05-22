@@ -62,6 +62,9 @@ type SpawnOptions struct {
 	OAuthToken        string
 	ResumeFrom        string
 	BypassPermissions bool
+	// Effort sets claude's thinking depth via the --effort flag.
+	// One of: "low", "medium", "high", "xhigh", "max". Empty = claude default.
+	Effort string
 
 	// Extra environment to pass to the child, in `KEY=VALUE` form. Used by
 	// hooks integration in M1.3 (e.g. CIB_HOOK_HMAC_SECRET) and tests.
@@ -289,6 +292,9 @@ func (m *Manager) commandFor(opts SpawnOptions) (string, []string, error) {
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
+	if opts.Effort != "" {
+		args = append(args, "--effort", opts.Effort)
+	}
 	if opts.ResumeFrom != "" {
 		args = append(args, "--resume", opts.ResumeFrom)
 	}
@@ -443,10 +449,6 @@ func (m *Manager) EmitHookFrame(sessionID, event string, payload json.RawMessage
 
 	return nil
 }
-
-// extractLastAssistantText was used by the hook translator before
-// cctranscript took over reading the JSONL. Kept commented out
-// historically; remove for clarity.
 
 // busAdapter satisfies cctranscript.Publisher around a *stream.Bus.
 type busAdapter struct{ bus *stream.Bus }

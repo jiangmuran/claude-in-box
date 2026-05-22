@@ -115,6 +115,7 @@ control plane fans out.
 {
   "workdir":            "/workspace",
   "model":              "claude-opus-4-7",
+  "effort":             "high",
   "auth_mode":          "subscription",
   "oauth_token":        "...",
   "api_key":            "...",
@@ -123,6 +124,10 @@ control plane fans out.
   "bypass_permissions": true
 }
 ```
+
+`effort` (one of `low | medium | high | xhigh | max`) maps to claude's
+`--effort` flag — sets the thinking depth for this session. Omit to let
+claude pick its default for the model.
 
 Auth resolution:
 
@@ -156,6 +161,37 @@ DELETE accepts `?signal=term` (default) or `?signal=kill`.
 ```
 
 ### `POST /api/sessions/{id}/interrupt` — ctrl-c
+
+### `POST /api/sessions/{id}/send` — one-shot send-and-wait
+
+Best path for MCU / non-streaming clients: write a prompt, block until
+the next stop frame (or timeout), get only the new chat messages back.
+
+```http
+POST /api/sessions/<id>/send
+Authorization: Bearer <TOKEN>
+Content-Type: application/json
+
+{ "prompt": "list the workspace files", "timeout_ms": 60000 }
+```
+
+Response (200 OK):
+
+```json
+{
+  "session":  "uuid",
+  "last_seq": 99,
+  "messages": [
+    { "seq": 86, "role": "user",      "text": "list the workspace files" },
+    { "seq": 91, "role": "tool",      "tool": "Bash", "summary": "ok · 17ms" },
+    { "seq": 97, "role": "assistant", "text": "no files." }
+  ]
+}
+```
+
+408 Request Timeout when `timeout_ms` elapsed first; body includes the
+partial messages produced so far + `"partial": true`. `timeout_ms`
+defaults to 60 000, capped at 300 000.
 
 ### `GET /api/sessions/{id}/transcript[?from=<seq>]`
 
@@ -422,6 +458,7 @@ AES envelope routes:
 |---|---|
 | `POST /aes/sessions/{id}/input` | encrypted keystroke push |
 | `POST /aes/sessions/{id}/events/poll` | encrypted long-poll for frames |
+| `POST /aes/sessions/{id}/chat` | encrypted slim chat list, body `{"since":N}` |
 
 Each request carries 4 headers:
 

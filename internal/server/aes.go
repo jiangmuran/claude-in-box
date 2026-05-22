@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -89,8 +88,13 @@ func (s *Server) readEnvelope(r *http.Request) ([]byte, aespkg.Headers, []byte, 
 
 // writeEnvelope encrypts `out` with the same per-device key and writes the
 // ciphertext as the response body, signed by a server-chosen response nonce
-// and the "RESPONSE" AAD pseudo-method.
-func (s *Server) writeEnvelope(w http.ResponseWriter, r *http.Request, h aespkg.Headers, key, out []byte) {
+// and the "RESPONSE" AAD pseudo-method. `status` is the HTTP status to
+// set on the outer response so non-200 application outcomes surface at
+// the transport layer.
+func (s *Server) writeEnvelope(w http.ResponseWriter, r *http.Request, h aespkg.Headers, key, out []byte, status int) {
+	if status == 0 {
+		status = http.StatusOK
+	}
 	respH, err := aespkg.NewHeaders(h.KeyID)
 	if err != nil {
 		writeAESError(w, http.StatusInternalServerError, "ServerError", err.Error())
@@ -105,7 +109,7 @@ func (s *Server) writeEnvelope(w http.ResponseWriter, r *http.Request, h aespkg.
 	w.Header().Set(aespkg.HeaderNonce, respH.NonceHex)
 	w.Header().Set(aespkg.HeaderTimestamp, strconv.FormatInt(respH.TimestampMillis, 10))
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(status)
 	_, _ = w.Write(ct)
 }
 
@@ -302,17 +306,20 @@ func (s *Server) aesEventsPoll(w http.ResponseWriter, r *http.Request) {
 }
 
 // aesRespJSON encodes v to JSON and writes it as an encrypted response.
-// status only affects the implicit 200 — actual HTTP status is always 200
-// on a successful envelope; errors at the protocol layer go through
-// writeAESError above.
+// aesRespJSON encrypts `v` and writes the envelope back. `status` is the
+// HTTP status code applied to the outer response so non-200 outcomes
+// (e.g. "no such session" 404, "bad input" 400) are visible at the
+// transport layer even though the body itself is the encrypted JSON
+// payload. Protocol-level errors (bad envelope, replay, drift) go
+// through writeAESError instead — those return cleartext JSON because
+// the device has no key context to decrypt with yet.
 func (s *Server) aesRespJSON(w http.ResponseWriter, r *http.Request, h aespkg.Headers, key []byte, status int, v any) {
-	_ = status // reserved for future status-in-envelope semantics
 	b, err := json.Marshal(v)
 	if err != nil {
 		writeAESError(w, http.StatusInternalServerError, "ServerError", err.Error())
 		return
 	}
-	s.writeEnvelope(w, r, h, key, b)
+	s.writeEnvelope(w, r, h, key, b, status)
 }
 
 // filterAfter returns the first n frames in fs whose Seq > from.
@@ -329,7 +336,3 @@ func filterAfter(fs []stream.Frame, from uint64, n int) []stream.Frame {
 	return out
 }
 
-// Compile-time only; ensures we keep `hex` linked even if other call-sites
-// drop it.
-var _ = hex.EncodeToString
-var _ = strconv.Itoa

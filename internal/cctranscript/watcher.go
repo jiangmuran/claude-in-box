@@ -35,20 +35,23 @@ type Publisher interface {
 // Watcher tails a single JSONL transcript file. Cancel ctx (or Stop()) to
 // release the goroutine.
 type Watcher struct {
-	Path  string
-	Bus   Publisher
-	Poll  time.Duration // default 150 ms
+	Path string
+	Bus  Publisher
+	Poll time.Duration // default 150 ms
 
 	// toolNames caches { tool_use_id -> tool_name } so we can join
 	// tool_use blocks (from assistant turns) to their tool_result blocks
 	// (which arrive later in user turns).
 	toolNames sync.Map // map[string]string
 
-	once   sync.Once
-	cancel context.CancelFunc
-	done   chan struct{}
-	off    int64
-	closed atomic.Bool
+	mu      sync.Mutex // protects cancel, started, off
+	cancel  context.CancelFunc
+	started bool
+	off     int64
+
+	done    chan struct{} // closed exactly once via doneOnce
+	doneOnce sync.Once
+	closed   atomic.Bool
 }
 
 // New creates a Watcher; call Start to begin tailing.
@@ -56,31 +59,46 @@ func New(path string, bus Publisher) *Watcher {
 	return &Watcher{Path: path, Bus: bus, Poll: 150 * time.Millisecond, done: make(chan struct{})}
 }
 
-// Start tails the file in a goroutine. It is safe to call once.
-// When the watcher exits (ctx cancelled, fatal error), the done channel
-// is closed.
+// Start tails the file in a goroutine. Safe to call multiple times —
+// only the first call launches the goroutine.
 func (w *Watcher) Start(ctx context.Context) {
-	w.once.Do(func() {
-		ctx, w.cancel = context.WithCancel(ctx)
-		go w.run(ctx)
-	})
+	w.mu.Lock()
+	if w.started {
+		w.mu.Unlock()
+		return
+	}
+	w.started = true
+	ctx, w.cancel = context.WithCancel(ctx)
+	w.mu.Unlock()
+	go w.run(ctx)
 }
 
-// Stop cancels the watcher's context.
+// Stop cancels the watcher's context. Safe to call before Start (in
+// which case Done() returns a channel that is closed immediately) and
+// safe to call multiple times.
 func (w *Watcher) Stop() {
 	if w.closed.Swap(true) {
 		return
 	}
-	if w.cancel != nil {
-		w.cancel()
+	w.mu.Lock()
+	cancel := w.cancel
+	started := w.started
+	w.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if !started {
+		// Stop called before Start ever ran; nobody will close `done`.
+		w.doneOnce.Do(func() { close(w.done) })
 	}
 }
 
-// Done returns a channel closed when the watcher's goroutine exits.
+// Done returns a channel closed when the watcher's goroutine exits (or
+// immediately if Stop was called before Start).
 func (w *Watcher) Done() <-chan struct{} { return w.done }
 
 func (w *Watcher) run(ctx context.Context) {
-	defer close(w.done)
+	defer w.doneOnce.Do(func() { close(w.done) })
 
 	// Wait for the file to appear. Claude writes it shortly after the
 	// session starts; if it never shows up, the watcher just sits idle.

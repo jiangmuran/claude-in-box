@@ -138,8 +138,11 @@ export interface ProviderProbe {
 }
 
 export interface Prefs {
-  default_auth_mode?: 'subscription' | 'api_key' | ''
+  // "-" is a sentinel for PATCH that clears the field; "" means "unset"
+  // on read. Server normalises both.
+  default_auth_mode?: 'subscription' | 'api_key' | '' | '-'
   default_provider_id?: string
   default_model?: string
+  default_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | '' | '-'
   updated_at?: string
 }

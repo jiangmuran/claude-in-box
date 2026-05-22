@@ -102,6 +102,11 @@ func (s *Server) routes() {
 	// MCU-class devices that can only afford a few hundred KB of heap.
 	mux.Handle("GET /api/sessions/{id}/chat",
 		auth.Require(s.cfg.Tokens, auth.ScopeSessionsRead)(http.HandlerFunc(s.chatMessages)))
+	// One-shot send-and-wait: write prompt + block until next stop frame
+	// (or timeout_ms) + return slim-chat delta. Designed for MCU clients
+	// that want a single HTTP round-trip per turn.
+	mux.Handle("POST /api/sessions/{id}/send",
+		auth.Require(s.cfg.Tokens, auth.ScopeSessionsInput)(http.HandlerFunc(s.sendAndWait)))
 
 	// Streams.
 	mux.Handle("GET /ws/sessions/{id}",

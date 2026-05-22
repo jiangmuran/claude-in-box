@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/jiangmuran/claude-in-box/internal/stream"
@@ -63,25 +62,38 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	// Re-emit any historical messages newer than `since` so a reconnecting
-	// MCU client doesn't lose the gap.
-	for _, m := range filterSince(aggregateChat(sess.Snapshot()), since) {
+	// Snapshot first, then subscribe FROM the snapshot's seq high-water
+	// mark — eliminates the replay-race where frames published between
+	// the historical re-emit and the Subscribe call would be emitted
+	// twice. Same resume model as /sse/sessions/{id}.
+	historical := sess.Snapshot()
+	var lastReplayed uint64
+	for _, m := range filterSince(aggregateChat(historical), since) {
+		if seq, ok := m["seq"].(uint64); ok && seq > lastReplayed {
+			lastReplayed = seq
+		}
 		writeChatSSE(w, "chat", m)
 	}
 	flusher.Flush()
 
+	// Seed the streaming aggregator with the historical state so the
+	// next live text.delta on a still-open turn emits `event: update`
+	// (continuation) rather than `event: chat` (new bubble), and so
+	// tool-result frames can join their tool-use entry.
+	agg := newChatAgg(func(kind string, m map[string]any) {
+		writeChatSSE(w, kind, m)
+		flusher.Flush()
+	})
+	agg.warmup(historical)
+
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	sub := sess.Bus().Subscribe(ctx, sess.LastSeq(), 256)
-	defer sub.Cancel()
-
-	// Per-stream running aggregator state.
-	agg := &chatAgg{
-		emit: func(kind string, m map[string]any) {
-			writeChatSSE(w, kind, m)
-			flusher.Flush()
-		},
+	subFrom := lastReplayed
+	if subFrom == 0 {
+		subFrom = since
 	}
+	sub := sess.Bus().Subscribe(ctx, subFrom, 256)
+	defer sub.Cancel()
 
 	heartbeat := time.NewTicker(25 * time.Second)
 	defer heartbeat.Stop()
@@ -123,6 +135,24 @@ type chatAgg struct {
 
 	// Tool entries indexed by tool_use_id awaiting result.
 	tools map[string]map[string]any
+}
+
+// newChatAgg constructs an agg with an empty tools map (so callers don't
+// have to nil-check).
+func newChatAgg(emit func(kind string, m map[string]any)) *chatAgg {
+	return &chatAgg{emit: emit, tools: map[string]map[string]any{}}
+}
+
+// warmup replays a frame slice silently (no emit) so that a `?since=`
+// resume picks up open turns / in-flight tool calls correctly. Same
+// transitions step() does, but `emit` is suppressed.
+func (a *chatAgg) warmup(frames []stream.Frame) {
+	orig := a.emit
+	a.emit = func(string, map[string]any) {} // swallow
+	for _, f := range frames {
+		a.step(f)
+	}
+	a.emit = orig
 }
 
 func (a *chatAgg) step(f stream.Frame) {
@@ -181,9 +211,6 @@ func (a *chatAgg) step(f stream.Frame) {
 			"tool":    d.Tool,
 			"summary": "running",
 		}
-		if a.tools == nil {
-			a.tools = map[string]map[string]any{}
-		}
 		if d.ToolUseID != "" {
 			a.tools[d.ToolUseID] = entry
 		}
@@ -213,9 +240,17 @@ func (a *chatAgg) step(f stream.Frame) {
 		delete(a.tools, d.ToolUseID)
 
 	case stream.KindStop:
-		// Close open bubbles; emit a stop event so MCU knows the turn is done.
+		// Close open bubbles; flush any tool entries that never received
+		// their result so the device can render them as orphans rather
+		// than leak them in our state.
 		a.openUser = nil
 		a.openAssistant = nil
+		for id, entry := range a.tools {
+			entry["summary"] = "orphan"
+			entry["seq"] = uint64(f.Seq)
+			a.emit("update", entry)
+			delete(a.tools, id)
+		}
 		var d struct {
 			Reason     string `json:"reason"`
 			DurationMs int64  `json:"duration_ms"`
@@ -228,7 +263,3 @@ func (a *chatAgg) step(f stream.Frame) {
 		})
 	}
 }
-
-// Ensure parseSinceQuery / strconv stays referenced when these become
-// the only consumers in this file.
-var _ = strconv.ParseUint

@@ -61,6 +61,7 @@ export const api = {
   createSession: (opts: {
     workdir?: string
     model?: string
+    effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
     auth_mode?: 'subscription' | 'api_key'
     api_key?: string
     oauth_token?: string

@@ -19,10 +19,11 @@ import (
 // Prefs is the persisted shape. Add fields here as we learn more about
 // what the UI wants to remember.
 type Prefs struct {
-	DefaultAuthMode  string    `json:"default_auth_mode,omitempty"`  // "subscription" | "api_key" | ""
-	DefaultProviderID string   `json:"default_provider_id,omitempty"`
-	DefaultModel     string    `json:"default_model,omitempty"`
-	UpdatedAt        time.Time `json:"updated_at,omitempty"`
+	DefaultAuthMode   string    `json:"default_auth_mode,omitempty"` // "subscription" | "api_key" | ""
+	DefaultProviderID string    `json:"default_provider_id,omitempty"`
+	DefaultModel      string    `json:"default_model,omitempty"`
+	DefaultEffort     string    `json:"default_effort,omitempty"` // low | medium | high | xhigh | max
+	UpdatedAt         time.Time `json:"updated_at,omitempty"`
 }
 
 // Store is the persistent prefs registry.
@@ -113,6 +114,13 @@ func (s *Store) Patch(delta Prefs) error {
 			s.p.DefaultModel = ""
 		} else {
 			s.p.DefaultModel = delta.DefaultModel
+		}
+	}
+	if delta.DefaultEffort != "" {
+		if delta.DefaultEffort == "-" {
+			s.p.DefaultEffort = ""
+		} else {
+			s.p.DefaultEffort = delta.DefaultEffort
 		}
 	}
 	s.p.UpdatedAt = time.Now().UTC()

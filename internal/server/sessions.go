@@ -18,6 +18,7 @@ import (
 type createSessionRequest struct {
 	Workdir           string `json:"workdir,omitempty"`
 	Model             string `json:"model,omitempty"`
+	Effort            string `json:"effort,omitempty"` // low|medium|high|xhigh|max
 	AuthMode          string `json:"auth_mode,omitempty"`
 	APIKey            string `json:"api_key,omitempty"`
 	OAuthToken        string `json:"oauth_token,omitempty"`
@@ -137,6 +138,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	spawnOpts := session.SpawnOptions{
 		Workdir:           req.Workdir,
 		Model:             req.Model,
+		Effort:            req.Effort,
 		AuthMode:          authMode,
 		APIKey:            apiKey,
 		OAuthToken:        oauth,

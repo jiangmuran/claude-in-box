@@ -125,7 +125,18 @@
     let sid = ''
     activeSessionId.subscribe((v) => (sid = v))()
     if (!sid) return
-    try { await api.sendInput(sid, String(n) + '\r') } catch { /* surface as ask error later */ }
+    // For options 1–9 claude's TUI accepts the numeric keystroke + Enter.
+    // For 10+, sending "10\r" gets interpreted as "1" (selects option 1)
+    // followed by "0" (no-op) by the per-keystroke handler. Use arrow-
+    // down + Enter instead: move the cursor (n-1) times then submit.
+    try {
+      if (n >= 1 && n <= 9) {
+        await api.sendInput(sid, String(n) + '\r')
+      } else {
+        const down = '\x1b[B'.repeat(Math.max(0, n - 1))
+        await api.sendInput(sid, down + '\r')
+      }
+    } catch { /* surface as ask error later */ }
   }
 
   function fmt(input: unknown): string {

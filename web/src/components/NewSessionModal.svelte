@@ -13,6 +13,7 @@
 
   let workdir = $state('/workspace')
   let model = $state('')
+  let effort = $state<'' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'>('')
   let authMode = $state<'subscription' | 'api_key'>('subscription')
   let providerId = $state('')
   let providers = $state<Provider[]>([])
@@ -29,6 +30,9 @@
       }
       if (p.default_provider_id) providerId = p.default_provider_id
       if (p.default_model) model = p.default_model
+      if (p.default_effort && ['low','medium','high','xhigh','max'].includes(p.default_effort)) {
+        effort = p.default_effort as typeof effort
+      }
     } catch { /* prefs are optional */ }
     await refreshProviders()
   })
@@ -50,6 +54,7 @@
       const s = await api.createSession({
         workdir,
         model: model || undefined,
+        effort: effort || undefined,
         auth_mode: authMode,
         provider_id: authMode === 'api_key' && providerId ? providerId : undefined,
         bypass_permissions: true,
@@ -60,6 +65,7 @@
           default_auth_mode: authMode,
           default_provider_id: authMode === 'api_key' ? (providerId || '-') : '-',
           default_model: model || '-',
+          default_effort: effort || '-',
         })
       } catch { /* best-effort */ }
       oncreated(s)
@@ -102,6 +108,22 @@
         spellcheck="false"
       />
     </label>
+
+    <div class="field">
+      <span class="label">{$T('thinking effort · optional', '思考深度 · 可选')}</span>
+      <div class="seg effort-seg">
+        {#each ['', 'low', 'medium', 'high', 'xhigh', 'max'] as e (e)}
+          <button
+            type="button"
+            class="seg-btn"
+            class:active={effort === e}
+            onclick={() => (effort = e as typeof effort)}
+          >
+            {e === '' ? $T('auto', '自动') : e}
+          </button>
+        {/each}
+      </div>
+    </div>
 
     <div class="field">
       <span class="label">{$T('billing', '计费')}</span>

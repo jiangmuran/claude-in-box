@@ -13,7 +13,11 @@
   async function submit() {
     if (!text.trim()) return
     busy = true; error = ''
-    const payload = text.endsWith('\n') ? text : text + '\n'
+    // claude's ink-based REPL treats \r as "submit" and \n as "insert
+    // newline into the prompt buffer". Sending \n leaves the message
+    // sitting in the input, which the user reads as "my Enter did
+    // nothing". Always terminate with a single \r.
+    const payload = text.replace(/[\r\n]+$/, '') + '\r'
     try {
       await api.sendInput(sessionId, payload)
       text = ''

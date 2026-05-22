@@ -110,6 +110,27 @@ func WaitForTurn(parent context.Context, sess sessionForSend, prompt string, tim
 			if f.Kind != stream.KindStop {
 				continue
 			}
+			// Hook-synthesized stop fires as soon as claude says "turn
+			// done", but the cctranscript watcher reads claude's JSONL
+			// asynchronously and the assistant's final text often lands
+			// 100-400 ms LATER. Drain the bus for a short settle window
+			// so the chat aggregate actually includes the reply.
+			drainUntil := time.NewTimer(400 * time.Millisecond)
+			for draining := true; draining; {
+				select {
+				case <-drainUntil.C:
+					draining = false
+				case _, ok := <-sub.Frames():
+					if !ok {
+						draining = false
+					}
+					// keep draining — each new frame resets nothing; we
+					// just want to give the watcher a chance to flush
+				case <-ctx.Done():
+					draining = false
+				}
+			}
+			drainUntil.Stop()
 			out := filterSince(aggregateChat(sess.Snapshot()), startSeq)
 			return map[string]any{
 				"session":  "",

@@ -72,6 +72,7 @@ func NewFrame(session string, seq uint64, kind string, data any) (Frame, error) 
 
 type TextDeltaData struct {
 	Text string `json:"text"`
+	Role string `json:"role,omitempty"` // "user" | "assistant"
 }
 
 type ToolUseStartData struct {

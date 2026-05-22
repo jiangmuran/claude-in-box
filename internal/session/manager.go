@@ -383,18 +383,136 @@ func (m *Manager) CheckHookToken(sessionID, provided string) bool {
 }
 
 // EmitHookFrame implements hooks.Sink. Publishes a `hook` frame on the
-// session's bus.
+// session's bus AND opportunistically translates well-known events into
+// structured frames the Web UI's driver view already understands —
+// text.delta, tool.use.start, tool.use.result, stop, status — so that
+// the chat-style view has something to render even though interactive
+// REPL claude does not emit stream-json itself.
 func (m *Manager) EmitHookFrame(sessionID, event string, payload json.RawMessage) error {
 	s, ok := m.Get(sessionID)
 	if !ok {
 		return hooks.ErrUnknownSession
 	}
-	_, err := s.Bus().Publish(stream.KindHook, stream.HookData{
+	bus := s.Bus()
+	if _, err := bus.Publish(stream.KindHook, stream.HookData{
 		Name:    event,
 		Event:   event,
 		Payload: payload,
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+
+	// Translation map — best-effort; failure to translate is fine, the
+	// raw `hook` frame above is still on the bus.
+	switch event {
+	case "UserPromptSubmit":
+		var p struct {
+			Prompt string `json:"prompt"`
+		}
+		if json.Unmarshal(payload, &p) == nil && p.Prompt != "" {
+			_, _ = bus.Publish(stream.KindTextDelta, stream.TextDeltaData{
+				Role: "user",
+				Text: p.Prompt,
+			})
+			s.SetState(stream.StateWorking)
+			_, _ = bus.Publish(stream.KindStatus, stream.StatusData{State: stream.StateWorking})
+		}
+
+	case "PreToolUse":
+		var p struct {
+			ToolName  string          `json:"tool_name"`
+			ToolInput json.RawMessage `json:"tool_input"`
+		}
+		if json.Unmarshal(payload, &p) == nil {
+			_, _ = bus.Publish(stream.KindToolUseStart, stream.ToolUseStartData{
+				Tool:  p.ToolName,
+				Input: p.ToolInput,
+			})
+		}
+
+	case "PostToolUse":
+		var p struct {
+			ToolName     string          `json:"tool_name"`
+			ToolResponse json.RawMessage `json:"tool_response"`
+		}
+		if json.Unmarshal(payload, &p) == nil {
+			_, _ = bus.Publish(stream.KindToolUseResult, stream.ToolUseResultData{
+				Tool:   p.ToolName,
+				Output: p.ToolResponse,
+			})
+		}
+
+	case "Stop", "SubagentStop":
+		// Try to read claude's own transcript file and surface the last
+		// assistant message as a text.delta frame.
+		var p struct {
+			TranscriptPath string `json:"transcript_path"`
+		}
+		if json.Unmarshal(payload, &p) == nil && p.TranscriptPath != "" {
+			if text := extractLastAssistantText(p.TranscriptPath); text != "" {
+				_, _ = bus.Publish(stream.KindTextDelta, stream.TextDeltaData{
+					Role: "assistant",
+					Text: text,
+				})
+			}
+		}
+		s.SetState(stream.StateIdle)
+		_, _ = bus.Publish(stream.KindStatus, stream.StatusData{State: stream.StateIdle})
+	}
+
+	return nil
+}
+
+// extractLastAssistantText reads a claude transcript JSONL file and
+// returns the text content of the most recent assistant message, or "".
+// Tolerant of schema drift — only looks for { type:"assistant",
+// message:{ content:[ { type:"text", text:"..." } ] } }-shaped lines.
+func extractLastAssistantText(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(b), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || line[0] != '{' {
+			continue
+		}
+		var entry struct {
+			Type    string `json:"type"`
+			Message struct {
+				Role    string `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			continue
+		}
+		if entry.Type != "assistant" && entry.Message.Role != "assistant" {
+			continue
+		}
+		// Content can be a string OR an array of blocks.
+		var asStr string
+		if err := json.Unmarshal(entry.Message.Content, &asStr); err == nil && asStr != "" {
+			return asStr
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(entry.Message.Content, &blocks); err == nil {
+			var out strings.Builder
+			for _, b := range blocks {
+				if b.Type == "text" && b.Text != "" {
+					out.WriteString(b.Text)
+				}
+			}
+			if out.Len() > 0 {
+				return out.String()
+			}
+		}
+	}
+	return ""
 }
 
 func applyEnv(env []string, overrides map[string]string) []string {

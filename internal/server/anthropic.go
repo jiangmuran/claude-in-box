@@ -125,6 +125,18 @@ func (s *Server) anthropicRunTurn(r *http.Request, req *anthropicRequest) (*anth
 	// expects: reap() catches Wait() and tears down the bus.
 	defer func() { _ = sess.Kill(syscall.SIGTERM) }()
 
+	// Wait for claude to come up before writing the prompt. We watch for
+	// the first `meta` frame the cctranscript watcher emits when it sees
+	// the system.init line in the JSONL transcript — that's the earliest
+	// reliable signal that claude is alive and ready for input. Without
+	// this guard the spawn→write window races: claude is still rendering
+	// the welcome screen when we write, the keystrokes get swallowed,
+	// WaitForTurn then sits at its 2-minute cap waiting for a stop that
+	// never comes.
+	if err := waitForClaudeReady(ctx, sess, 30*time.Second); err != nil {
+		return nil, http.StatusGatewayTimeout, fmt.Errorf("ready: %w", err)
+	}
+
 	out, _, runErr := WaitForTurn(ctx, sess, prompt, 2*time.Minute)
 	if runErr != nil {
 		return nil, http.StatusGatewayTimeout, runErr
@@ -214,6 +226,36 @@ func (s *Server) anthropicMessagesStream(w http.ResponseWriter, r *http.Request,
 		"usage": map[string]any{"output_tokens": resp.Usage.OutputTokens},
 	})
 	emit("message_stop", map[string]any{"type": "message_stop"})
+}
+
+// waitForClaudeReady blocks until either a `meta` frame appears on the
+// session's bus (claude's transcript JSONL has been written, so the
+// process is alive and the REPL is up) or `timeout` elapses.
+func waitForClaudeReady(parent context.Context, sess sessionForSend, timeout time.Duration) error {
+	if sess.LastSeq() > 0 {
+		for _, f := range sess.Snapshot() {
+			if f.Kind == stream.KindMeta {
+				return nil
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	sub := sess.Bus().Subscribe(ctx, 0, 64)
+	defer sub.Cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for claude ready")
+		case f, ok := <-sub.Frames():
+			if !ok {
+				return fmt.Errorf("session ended before ready")
+			}
+			if f.Kind == stream.KindMeta {
+				return nil
+			}
+		}
+	}
 }
 
 // renderMessagesAsPrompt flattens the Anthropic messages array (and

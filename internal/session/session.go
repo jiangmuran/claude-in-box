@@ -53,6 +53,9 @@ type Session struct {
 	done  chan struct{}
 	once  sync.Once
 	mu    sync.Mutex
+
+	// transcriptStop, when non-nil, cancels the cctranscript watcher.
+	transcriptStop func()
 }
 
 // Bus returns the session's event bus. Exposed so other packages (e.g. hook

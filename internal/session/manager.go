@@ -16,6 +16,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/google/uuid"
 
+	"github.com/jiangmuran/claude-in-box/internal/cctranscript"
 	"github.com/jiangmuran/claude-in-box/internal/hooks"
 	"github.com/jiangmuran/claude-in-box/internal/stream"
 )
@@ -201,7 +202,12 @@ func (m *Manager) reap(s *Session) {
 	s.mu.Lock()
 	s.StoppedAt = time.Now().UTC()
 	s.ExitCode = exitCode
+	stopTranscript := s.transcriptStop
+	s.transcriptStop = nil
 	s.mu.Unlock()
+	if stopTranscript != nil {
+		stopTranscript()
+	}
 
 	reason := "exit"
 	if failed {
@@ -402,6 +408,25 @@ func (m *Manager) EmitHookFrame(sessionID, event string, payload json.RawMessage
 		return err
 	}
 
+	// Start the transcript watcher the first time we see a transcript_path
+	// on any hook event — claude writes the live JSONL we want to tail.
+	// Hooks fire before claude's transcript file finishes being created,
+	// but the watcher waits for the file to appear.
+	type transcriptCarrier struct {
+		TranscriptPath string `json:"transcript_path"`
+	}
+	var tc transcriptCarrier
+	if json.Unmarshal(payload, &tc) == nil && tc.TranscriptPath != "" {
+		s.mu.Lock()
+		if s.transcriptStop == nil {
+			ctx, cancel := context.WithCancel(context.Background())
+			w := cctranscript.New(tc.TranscriptPath, busAdapter{bus})
+			w.Start(ctx)
+			s.transcriptStop = cancel
+		}
+		s.mu.Unlock()
+	}
+
 	// Translation map — best-effort; failure to translate is fine, the
 	// raw `hook` frame above is still on the bus.
 	switch event {
@@ -513,6 +538,14 @@ func extractLastAssistantText(path string) string {
 		}
 	}
 	return ""
+}
+
+// busAdapter satisfies cctranscript.Publisher around a *stream.Bus.
+type busAdapter struct{ bus *stream.Bus }
+
+func (a busAdapter) Publish(kind string, data any) (any, error) {
+	f, err := a.bus.Publish(kind, data)
+	return f, err
 }
 
 func applyEnv(env []string, overrides map[string]string) []string {

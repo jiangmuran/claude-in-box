@@ -227,6 +227,39 @@ Limits in this first cut:
   the request currently sees them as opaque text in the prompt.
 - Vision input (image content blocks) is dropped.
 
+## OpenAI Chat Completions API compatibility
+
+`POST /openai/v1/chat/completions` accepts the OpenAI Chat Completions
+wire shape and projects internally through the same Anthropic pipeline.
+Lets an unmodified `openai` Python SDK or `openai-node` client talk to
+cib:
+
+```python
+from openai import OpenAI
+client = OpenAI(api_key="<cib bearer token>",
+                base_url="https://your-box.example.com/openai/v1")
+r = client.chat.completions.create(
+    model="claude-opus-4-7",
+    messages=[
+      {"role": "system", "content": "Be terse."},
+      {"role": "user",   "content": "say only the word READY"},
+    ],
+)
+print(r.choices[0].message.content)
+```
+
+Mapping notes:
+
+- `system`-role messages are folded into the Anthropic `system` field
+  (multiple system messages concatenated with `\n\n`).
+- Response shape is OpenAI's `chat.completion` with one choice carrying
+  the full assistant text.
+- `stream: true` emits OpenAI `chat.completion.chunk` SSE events
+  (role, content, finish) ending in `data: [DONE]`. First cut returns
+  the full text in one content chunk; token-by-token incremental
+  streaming is on the same roadmap as Anthropic's.
+- Tools / function_call / vision input not yet translated.
+
 ## Port mapping — expose an in-container service on a host port
 
 cib ships with a `socat`-based forwarder so a service the user started

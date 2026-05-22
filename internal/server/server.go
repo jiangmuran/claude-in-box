@@ -202,6 +202,10 @@ func (s *Server) routes() {
 	// can point their base_url at cib.
 	mux.Handle("POST /v1/messages",
 		auth.Require(s.cfg.Tokens, auth.ScopeSessionsInput)(http.HandlerFunc(s.anthropicMessages)))
+	// OpenAI Chat Completions API compatibility — same idea, OpenAI wire
+	// shape on top of the same Anthropic pipeline.
+	mux.Handle("POST /openai/v1/chat/completions",
+		auth.Require(s.cfg.Tokens, auth.ScopeSessionsInput)(http.HandlerFunc(s.openaiChat)))
 
 	// Claude auth (in-container `claude auth login --claudeai`).
 	mux.Handle("GET /api/auth/claude/status",

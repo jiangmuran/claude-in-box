@@ -197,6 +197,12 @@ func (s *Server) routes() {
 	mux.Handle("DELETE /api/ports/{host_port}",
 		auth.Require(s.cfg.Tokens, auth.ScopePortsWrite)(http.HandlerFunc(s.unexposePort)))
 
+	// Anthropic Messages API compatibility — accepts the upstream wire
+	// shape so unmodified SDKs (`@anthropic-ai/sdk`, `anthropic` Python)
+	// can point their base_url at cib.
+	mux.Handle("POST /v1/messages",
+		auth.Require(s.cfg.Tokens, auth.ScopeSessionsInput)(http.HandlerFunc(s.anthropicMessages)))
+
 	// Claude auth (in-container `claude auth login --claudeai`).
 	mux.Handle("GET /api/auth/claude/status",
 		auth.Require(s.cfg.Tokens, auth.ScopeSessionsRead)(http.HandlerFunc(s.claudeAuthStatus)))

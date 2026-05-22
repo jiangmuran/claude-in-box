@@ -162,6 +162,71 @@ DELETE accepts `?signal=term` (default) or `?signal=kill`.
 
 ### `POST /api/sessions/{id}/interrupt` — ctrl-c
 
+## Anthropic Messages API compatibility
+
+cib exposes `POST /v1/messages` accepting the upstream Anthropic
+Messages wire shape so any existing SDK (`@anthropic-ai/sdk`,
+`anthropic` Python, raw curl) can point its `base_url` at cib and talk
+through it to a subscription-backed claude.
+
+```http
+POST /v1/messages
+Authorization: Bearer <TOKEN>
+Content-Type: application/json
+
+{
+  "model":      "claude-opus-4-7",
+  "max_tokens": 1024,
+  "messages":   [{ "role": "user", "content": "say only the word READY" }],
+  "system":     "Be terse."
+}
+```
+
+200:
+```json
+{
+  "id":           "msg_abc123…",
+  "type":         "message",
+  "role":         "assistant",
+  "content":      [{ "type": "text", "text": "READY" }],
+  "model":        "claude-opus-4-7",
+  "stop_reason":  "end_turn",
+  "stop_sequence": null,
+  "usage":        { "input_tokens": 7, "output_tokens": 1 }
+}
+```
+
+`stream: true` switches to SSE with `message_start` → `content_block_start`
+→ `content_block_delta` → `content_block_stop` → `message_delta` →
+`message_stop` events. The first cut emits the full text in a single
+`content_block_delta`; true incremental token-by-token streaming is a
+follow-up. The SSE format matches Anthropic closely enough that the
+official SDKs consume it without modification.
+
+Auth picks up cib's active mode (subscription vs api_key — set via the
+sign-in modal). The `/v1/messages` caller does not need to know which.
+
+Python example:
+```python
+import anthropic
+client = anthropic.Anthropic(
+    api_key="<cib bearer token>",
+    base_url="https://your-box.example.com",
+)
+msg = client.messages.create(
+    model="claude-opus-4-7", max_tokens=1024,
+    messages=[{"role": "user", "content": "hi"}],
+)
+print(msg.content[0].text)
+```
+
+Limits in this first cut:
+- Each request spawns a per-request session (~3-5s warm-up). A warm
+  session pool keyed by `bearer token + workdir` is on the roadmap.
+- `tools` / `tool_use` / `tool_result` blocks are not yet translated;
+  the request currently sees them as opaque text in the prompt.
+- Vision input (image content blocks) is dropped.
+
 ## Port mapping — expose an in-container service on a host port
 
 cib ships with a `socat`-based forwarder so a service the user started

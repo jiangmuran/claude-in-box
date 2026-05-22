@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte'
   import { api, ApiError } from '../lib/api'
   import { T } from '../lib/i18n'
-  import type { ClaudeFlowSnapshot } from '../lib/types'
+  import type { ClaudeFlowSnapshot, Provider, ProviderProbe } from '../lib/types'
 
   interface Props {
     onclose: () => void
@@ -10,14 +10,59 @@
   }
   let { onclose, onsuccess }: Props = $props()
 
+  // Auth-mode tab: pick ONCE here. Subscription + api_key are mutually
+  // exclusive at the server (configuring one wipes the other), so the
+  // rest of the UI doesn't re-ask per session.
+  let tab = $state<'subscription' | 'api_key'>('subscription')
+  let activeMode = $state<'subscription' | 'api_key' | ''>('')
+
+  // jmrai.net preset — a known third-party provider users can pick
+  // without configuring api_host manually.
+  const JMRAI_HOST = 'https://jmrai.net'
+  let jmraiKey = $state('')
+  let customLabel = $state('')
+  let customHost  = $state('https://api.anthropic.com')
+  let customKey   = $state('')
+  let customModel = $state('')
+  let probe = $state<ProviderProbe | null>(null)
+  let providers = $state<Provider[]>([])
+  let saving = $state(false)
+  let probing = $state(false)
+
   let flow = $state<ClaudeFlowSnapshot | null>(null)
   let code = $state('')
-  let starting = $state(true)
+  let starting = $state(false)
   let verifying = $state(false)
   let error = $state('')
   let copied = $state(false)
 
-  onMount(() => { start() })
+  async function refreshAuthState() {
+    try {
+      const [ps, p] = await Promise.all([api.listProviders(), api.getPrefs()])
+      providers = ps.providers
+      if (p.default_auth_mode === 'subscription' || p.default_auth_mode === 'api_key') {
+        activeMode = p.default_auth_mode
+        tab = p.default_auth_mode
+      }
+    } catch { /* best-effort */ }
+  }
+
+  onMount(() => {
+    refreshAuthState()
+  })
+
+  // Only auto-start the OAuth flow when the subscription tab is the
+  // active one and we haven't started already.
+  $effect(() => {
+    if (tab === 'subscription' && !flow && !starting && !verifying) {
+      start()
+    }
+    if (tab === 'api_key' && flow && (flow.state === 'starting' || flow.state === 'awaiting_code')) {
+      api.claudeCancel(flow.id).catch(() => {})
+      flow = null
+      code = ''
+    }
+  })
 
   onDestroy(() => {
     if (flow && (flow.state === 'starting' || flow.state === 'awaiting_code')) {
@@ -87,6 +132,79 @@
     } catch { /* ignore */ }
   }
 
+  async function savePresetJmrai() {
+    if (!jmraiKey.trim()) return
+    saving = true; error = ''
+    try {
+      await api.addProvider({
+        label: 'jmrai.net',
+        api_host: JMRAI_HOST,
+        api_key: jmraiKey.trim(),
+      })
+      await refreshAuthState()
+      onsuccess()
+    } catch (e) {
+      error = e instanceof ApiError ? e.message : (e as Error).message
+    } finally {
+      saving = false
+    }
+  }
+
+  async function saveCustom() {
+    if (!customHost || !customKey || !customLabel) return
+    saving = true; error = ''
+    try {
+      await api.addProvider({
+        label:    customLabel.trim(),
+        api_host: customHost.trim(),
+        api_key:  customKey.trim(),
+        model:    customModel.trim() || undefined,
+      })
+      await refreshAuthState()
+      onsuccess()
+    } catch (e) {
+      error = e instanceof ApiError ? e.message : (e as Error).message
+    } finally {
+      saving = false
+    }
+  }
+
+  async function probeCustom() {
+    probing = true; probe = null; error = ''
+    try {
+      probe = await api.probeProvider({
+        api_host: customHost,
+        api_key:  customKey,
+        model:    customModel || undefined,
+      })
+    } catch (e) {
+      error = e instanceof ApiError ? e.message : (e as Error).message
+    } finally {
+      probing = false
+    }
+  }
+
+  async function probeJmrai() {
+    probing = true; probe = null; error = ''
+    try {
+      probe = await api.probeProvider({
+        api_host: JMRAI_HOST,
+        api_key:  jmraiKey,
+      })
+    } catch (e) {
+      error = e instanceof ApiError ? e.message : (e as Error).message
+    } finally {
+      probing = false
+    }
+  }
+
+  async function removeProvider(id: string) {
+    try {
+      await api.deleteProvider(id)
+      await refreshAuthState()
+    } catch { /* best-effort */ }
+  }
+
   let isTerminalFailure = $derived(
     flow !== null && (flow.state === 'failed' || flow.state === 'timed_out' || flow.state === 'cancelled')
   )
@@ -103,16 +221,25 @@
   <h2 id="ca-title" class="serif">{$T('Connect your Claude account.', '连接你的 Claude 账号。')}</h2>
   <p class="lede serif">
     {$T(
-      "The container will keep its own Claude credentials. Once signed in, new sessions billing as",
-      '容器会保留它自己的 Claude 凭据。登录后,新会话只要选'
+      'Pick one and only one. Switching wipes the other — sessions afterwards use whatever is active here.',
+      '二选一,切换时另一种会被清除。新会话默认用这里的活动鉴权。'
     )}
-    <em class="em">{$T('subscription', '订阅')}</em>
-    {$T(
-      'use your interactive Pro/Max quota — the only path that stays on the interactive quota after the',
-      '就走你交互式 Pro/Max 配额 —— 这是'
-    )}
-    <a href="https://www.anthropic.com/news/agent-sdk-quotas" target="_blank" rel="noreferrer">{$T('2026-06-15 Agent SDK quota split', '2026-06-15 Agent SDK 配额拆分')}</a>{$T('.', '后唯一不被拆走的路径。')}
   </p>
+
+  <nav class="auth-tabs" role="tablist">
+    <button type="button" role="tab" class="auth-tab" class:active={tab === 'subscription'} onclick={() => (tab = 'subscription')}>
+      <span class="lbl">{$T('subscription', '订阅')}</span>
+      <span class="sub mono">claude.ai · oauth</span>
+      {#if activeMode === 'subscription'}<span class="active-dot" title={$T('currently active', '当前活动')}></span>{/if}
+    </button>
+    <button type="button" role="tab" class="auth-tab" class:active={tab === 'api_key'} onclick={() => (tab = 'api_key')}>
+      <span class="lbl">{$T('api key', 'api key')}</span>
+      <span class="sub mono">jmrai.net · third-party</span>
+      {#if activeMode === 'api_key'}<span class="active-dot"></span>{/if}
+    </button>
+  </nav>
+
+  {#if tab === 'subscription'}
 
   {#if starting}
     <div class="state mono"><span class="spinner"></span>{$T('starting flow…', '正在启动流程…')}</div>
@@ -174,6 +301,82 @@
     </div>
   {:else if error && flow && flow.state !== 'done'}
     <p class="err mono">[ {error} ]</p>
+  {/if}
+
+  {:else}
+    <!-- api_key tab — preset jmrai.net + custom provider, single-shot save. -->
+    <section class="preset">
+      <div class="preset-head">
+        <span class="who">jmrai.net</span>
+        <span class="hdr mono">{$T('built-in preset', '内置预设')}</span>
+      </div>
+      <p class="lede serif">
+        {$T(
+          'Anthropic-compatible third-party host. Paste your jmrai.net API key and save — your future sessions route through it.',
+          'Anthropic 兼容的第三方 endpoint。粘贴你的 jmrai.net API key 保存即可,之后会话都走这里。'
+        )}
+      </p>
+      <input
+        type="password"
+        bind:value={jmraiKey}
+        placeholder="sk-…"
+        spellcheck="false"
+        autocomplete="off"
+        class="key-in mono"
+      />
+      <div class="actions">
+        <button type="button" class="ghost" onclick={probeJmrai} disabled={!jmraiKey || probing}>
+          {probing ? $T('probing…', '检测中…') : $T('probe', '在线检测')}
+        </button>
+        <button type="button" class="primary" onclick={savePresetJmrai} disabled={!jmraiKey || saving}>
+          {saving ? $T('saving…', '保存中…') : $T('use jmrai.net', '使用 jmrai.net')}
+        </button>
+      </div>
+      {#if probe}
+        <div class="probe mono" class:ok={probe.ok}>
+          {probe.ok ? '[ ok ]' : '[ fail ]'} · {probe.http || 'net'} · {probe.latency_ms}ms
+          {#if probe.detail}<br /><span class="dim">{probe.detail}</span>{/if}
+        </div>
+      {/if}
+    </section>
+
+    <details class="custom-block">
+      <summary class="mono">{$T('or: custom api host', '或:自定义 api host')}</summary>
+      <div class="custom-form">
+        <input bind:value={customLabel} placeholder={$T('label', '名称')} spellcheck="false" class="mono" />
+        <input bind:value={customHost}  placeholder="https://api.anthropic.com" spellcheck="false" class="mono" />
+        <input type="password" bind:value={customKey} placeholder="sk-…" spellcheck="false" autocomplete="off" class="mono" />
+        <input bind:value={customModel} placeholder={$T('model · optional', '模型 · 可选')} spellcheck="false" class="mono" />
+        <div class="actions">
+          <button type="button" class="ghost" onclick={probeCustom} disabled={!customHost || !customKey || probing}>
+            {probing ? $T('probing…', '检测中…') : $T('probe', '在线检测')}
+          </button>
+          <button type="button" class="primary" onclick={saveCustom} disabled={!customLabel || !customHost || !customKey || saving}>
+            {saving ? $T('saving…', '保存中…') : $T('save provider', '保存 provider')}
+          </button>
+        </div>
+      </div>
+    </details>
+
+    {#if providers.length > 0}
+      <section class="existing">
+        <span class="divider">{$T('saved providers', '已保存的 provider')}</span>
+        <ul class="prov-list">
+          {#each providers as p (p.id)}
+            <li>
+              <span class="lbl">{p.label}</span>
+              <span class="host mono">{p.api_host}</span>
+              <span class="key mono">{p.api_key || ''}</span>
+              <button type="button" class="ghost danger" onclick={() => removeProvider(p.id)}>{$T('delete', '删除')}</button>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+
+    {#if error}
+      <p class="err mono">[ {error} ]</p>
+    {/if}
   {/if}
 
   <footer>
@@ -272,6 +475,136 @@
     background: var(--coral);
     animation: pulse 1s ease-in-out infinite;
   }
+
+  /* --- auth tabs --- */
+  .auth-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+  }
+  .auth-tab {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.15rem;
+    padding: 0.65rem 0.85rem;
+    background: var(--cream-2);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-xs);
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 120ms ease, background 120ms ease;
+  }
+  .auth-tab:hover { border-color: var(--coral); }
+  .auth-tab.active {
+    background: var(--cream);
+    border-color: var(--coral);
+    box-shadow: inset 0 -2px 0 var(--coral);
+  }
+  .auth-tab .lbl { font-family: var(--font-display); font-size: 0.95rem; color: var(--ink); }
+  .auth-tab .sub { font-size: 10px; color: var(--ink-faint); letter-spacing: 0.12em; text-transform: uppercase; }
+  .auth-tab .active-dot {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.55rem;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--ok);
+  }
+
+  /* --- preset jmrai card --- */
+  .preset {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    border: 1px solid var(--line-strong);
+    padding: 0.85rem 1rem;
+    background: var(--cream);
+  }
+  .preset-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
+  .preset-head .who { font-family: var(--font-display); color: var(--coral-deep); font-size: 1rem; }
+  .preset-head .hdr { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint); }
+  .key-in {
+    width: 100%;
+    border: 1px solid var(--line-strong);
+    background: var(--cream-2);
+    padding: 0.5rem 0.65rem;
+    font-size: 0.9rem;
+    color: var(--ink);
+  }
+  .key-in:focus { outline: none; border-color: var(--coral); }
+  .actions { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  .ghost {
+    padding: 0.4rem 0.85rem;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-xs);
+    background: transparent;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .ghost:hover:not(:disabled) { color: var(--coral-dark); border-color: var(--coral); }
+  .ghost.danger:hover { color: var(--danger); border-color: var(--danger); }
+  .ghost:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .probe {
+    padding: 0.55rem 0.7rem;
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    background: rgba(168, 40, 28, 0.06);
+    font-size: 11px;
+  }
+  .probe.ok {
+    border-color: var(--ok);
+    color: var(--ok);
+    background: rgba(83, 124, 76, 0.08);
+  }
+  .dim { opacity: 0.7; }
+
+  .custom-block { border: 1px dashed var(--line-strong); padding: 0.5rem 0.85rem; }
+  .custom-block summary {
+    list-style: none;
+    cursor: pointer;
+    color: var(--ink-3);
+    font-size: 12px;
+    padding: 0.25rem 0;
+  }
+  .custom-block summary::-webkit-details-marker { display: none; }
+  .custom-block summary::before { content: '▸ '; opacity: 0.6; }
+  .custom-block[open] summary::before { content: '▾ '; }
+  .custom-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+  .custom-form input {
+    border: none;
+    border-bottom: 1px solid var(--line-strong);
+    background: transparent;
+    padding: 0.4rem 0.1rem;
+    font-size: 0.88rem;
+    color: var(--ink);
+  }
+  .custom-form input:focus { outline: none; border-bottom-color: var(--coral); }
+
+  .existing { display: flex; flex-direction: column; gap: 0.4rem; }
+  .prov-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+  .prov-list li {
+    display: grid;
+    grid-template-columns: minmax(5rem, 8rem) 1fr auto auto;
+    gap: 0.65rem;
+    align-items: baseline;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--line);
+    background: var(--cream-2);
+    font-size: 12px;
+  }
+  .prov-list .lbl { color: var(--ink); font-family: var(--font-display); }
+  .prov-list .host { color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prov-list .key { color: var(--ink-faint); font-size: 11px; }
 
   .steps {
     list-style: none;

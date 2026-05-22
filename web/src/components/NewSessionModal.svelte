@@ -155,42 +155,30 @@
 
     <div class="field">
       <span class="label">{$T('billing', '计费')}</span>
-      <div class="seg">
-        <button
-          type="button"
-          class="seg-btn"
-          class:active={authMode === 'subscription'}
-          onclick={() => (authMode = 'subscription')}
-        >
-          {$T('subscription', '订阅')}
-        </button>
-        <button
-          type="button"
-          class="seg-btn"
-          class:active={authMode === 'api_key'}
-          onclick={() => (authMode = 'api_key')}
-        >
-          {$T('api key', 'api key')}
-        </button>
-      </div>
-      {#if authMode === 'subscription'}
-        <p class="hint mono">
-          {$T(
-            '— uses the in-container claude login (top-right chip) or CLAUDE_CODE_OAUTH_TOKEN env —',
-            '— 用容器内 claude login(右上角 chip)或 CLAUDE_CODE_OAUTH_TOKEN env —'
-          )}
-        </p>
-      {:else}
+      <p class="auth-info mono">
+        {#if authMode === 'subscription'}
+          <span class="dot ok"></span>{$T('subscription · claude.ai', '订阅 · claude.ai')}
+        {:else if providers.length > 0}
+          <span class="dot ok"></span>api_key · {providers[0].label}
+          {#if providers.length > 1}<span class="ink-faint"> + {providers.length - 1}</span>{/if}
+        {:else}
+          <span class="dot warn"></span>{$T('no auth configured', '尚未配置鉴权')}
+        {/if}
+      </p>
+      <p class="hint mono">
+        {$T(
+          '— change which auth is active from the [sign in] chip in the top bar —',
+          '— 顶栏 [登录] chip 里切换活动鉴权 —'
+        )}
+      </p>
+      {#if authMode === 'api_key' && providers.length > 1}
         <div class="provider-row">
           <select bind:value={providerId} disabled={busy}>
-            <option value="">{$T('— ANTHROPIC_API_KEY env —', '— 用 ANTHROPIC_API_KEY env —')}</option>
+            <option value="">{$T('— first provider —', '— 第一个 provider —')}</option>
             {#each providers as p (p.id)}
               <option value={p.id}>{p.label} · {p.api_host}{p.model ? ' · ' + p.model : ''}</option>
             {/each}
           </select>
-          <button type="button" class="ghost" onclick={() => (providersOpen = true)}>
-            {$T('manage', '管理')}
-          </button>
         </div>
       {/if}
     </div>
@@ -301,6 +289,24 @@
   .seg-btn:last-child { border-right: none; }
   .seg-btn.active { background: var(--ink); color: var(--cream); }
   .seg-btn:hover:not(.active) { background: var(--cream-2); }
+
+  .auth-info {
+    margin: 0.25rem 0 0;
+    color: var(--ink);
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .auth-info .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .auth-info .dot.ok { background: var(--ok); }
+  .auth-info .dot.warn { background: var(--amber); }
+  .auth-info .ink-faint { color: var(--ink-faint); }
 
   .resume-pick {
     width: 100%;

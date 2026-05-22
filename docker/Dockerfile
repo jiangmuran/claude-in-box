@@ -106,8 +106,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-rich ipython3 \
   && rm -rf /var/lib/apt/lists/*
 
-# Node.js LTS (for Claude Code itself and for users).
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+# Node.js LTS (for Claude Code itself and for users). 22.x is the
+# current Active LTS (started 2024-10); 20.x is in Maintenance through
+# 2026-04 only and many tools have started warning about it.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
   && apt-get update && apt-get install -y --no-install-recommends nodejs \
   && rm -rf /var/lib/apt/lists/*
 

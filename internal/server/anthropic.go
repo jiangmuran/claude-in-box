@@ -228,20 +228,45 @@ func (s *Server) anthropicMessagesStream(w http.ResponseWriter, r *http.Request,
 	emit("message_stop", map[string]any{"type": "message_stop"})
 }
 
-// waitForClaudeReady blocks until either a `meta` frame appears on the
-// session's bus (claude's transcript JSONL has been written, so the
-// process is alive and the REPL is up) or `timeout` elapses.
+// waitForClaudeReady blocks until claude's REPL is up — defined as
+// "the cctranscript watcher has emitted a meta frame carrying a
+// session_id field" (i.e. it saw the first JSONL line claude wrote).
+//
+// The plain Session.Spawn-emitted meta frame ("session started") is
+// NOT enough on its own — it fires synchronously during Spawn() before
+// claude has opened its PTY for input. We discriminate by looking for
+// session_id (or model) in the meta payload, which only cctranscript
+// populates.
 func waitForClaudeReady(parent context.Context, sess sessionForSend, timeout time.Duration) error {
-	if sess.LastSeq() > 0 {
-		for _, f := range sess.Snapshot() {
-			if f.Kind == stream.KindMeta {
-				return nil
-			}
+	isReadyMeta := func(f stream.Frame) bool {
+		if f.Kind != stream.KindMeta {
+			return false
+		}
+		var d map[string]any
+		if json.Unmarshal(f.Data, &d) != nil {
+			return false
+		}
+		if sid, _ := d["session_id"].(string); sid != "" {
+			return true
+		}
+		if m, _ := d["model"].(string); m != "" {
+			return true
+		}
+		return false
+	}
+	// Check what's already on the bus.
+	lastSeen := uint64(0)
+	for _, f := range sess.Snapshot() {
+		if isReadyMeta(f) {
+			return nil
+		}
+		if f.Seq > lastSeen {
+			lastSeen = f.Seq
 		}
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	sub := sess.Bus().Subscribe(ctx, 0, 64)
+	sub := sess.Bus().Subscribe(ctx, lastSeen, 64)
 	defer sub.Cancel()
 	for {
 		select {
@@ -251,7 +276,7 @@ func waitForClaudeReady(parent context.Context, sess sessionForSend, timeout tim
 			if !ok {
 				return fmt.Errorf("session ended before ready")
 			}
-			if f.Kind == stream.KindMeta {
+			if isReadyMeta(f) {
 				return nil
 			}
 		}

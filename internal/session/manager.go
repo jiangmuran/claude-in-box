@@ -445,6 +445,13 @@ func (m *Manager) EmitHookFrame(sessionID, event string, payload json.RawMessage
 	case "Stop", "SubagentStop":
 		s.SetState(stream.StateIdle)
 		_, _ = bus.Publish(stream.KindStatus, stream.StatusData{State: stream.StateIdle})
+		// Interactive REPL never writes a `result` line to the transcript
+		// JSONL (that's a --print-mode thing), so the cctranscript watcher
+		// never emits a stop frame on its own. Synthesize one here from
+		// the Stop hook so /send WaitForTurn and other end-of-turn
+		// consumers can wake up. Reason is the bare hook name; full
+		// duration/cost stats are not available from the hook payload.
+		_, _ = bus.Publish(stream.KindStop, stream.StopData{Reason: "turn_end"})
 	}
 
 	return nil

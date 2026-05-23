@@ -393,6 +393,50 @@ cib_status cib_stream(cib_client *c,
 
 `cib_call_oneshot` collects every TypeJSON record into a flat buffer (heartbeats and stream-end markers are dropped). `cib_stream` invokes the callback once per record as it arrives — the callback can return non-OK to abort the stream early. See `clients/c/example.c` for a full end-to-end demo.
 
+## Troubleshooting
+
+### Device sees `status: working` then `stop` but no `text.delta`
+
+`text.delta` (and `thinking` / `tool.use.*` / `usage`) come from the
+**transcript watcher**, which tails `~/.claude/projects/<encoded-workdir>/<sid>.jsonl`
+and translates each line. Lifecycle frames (`status`, `stop`, `meta`)
+do not — those are emitted directly on the bus.
+
+If the watcher never starts (e.g. claude rewrote the project dir in a
+way our encoder didn't predict, or hooks didn't fire with `transcript_path`),
+subscribers see lifecycle but no text. Two cooperating start paths
+mitigate this (see ARCHITECTURE.md §6):
+
+- **Auto-discovery** scans the projects dir every 300 ms for up to 90 s
+  after spawn.
+- **Hook-driven** start fires whenever any hook payload includes
+  `transcript_path`.
+
+Both write to the same `transcriptStop` guard; whichever finds the
+file first wins. If neither fires within 90 s the auto-discovery
+goroutine exits but the hook path remains armed for later events.
+
+On the device side: if you see lifecycle frames but the conversation
+content is empty, give the watcher up to ~1 s past spawn before the
+first turn lands; the timing margin is generous in practice. If a
+specific deployment reliably hits the empty-text symptom, check that
+`~/.claude/projects/` is mounted on a persistent volume so the watcher
+can find the file at all.
+
+### Server closed the TCP connection mid-stream
+
+The server signals an in-stream failure by closing the socket without
+writing the terminator record. The device should treat this as
+`BadEnvelope` and retry with a fresh stream id, ideally with a small
+backoff (50 ms doubling, cap 2 s).
+
+### `BadTag` on every record
+
+Either the device key is rotated server-side (compare `Sec-CIB-KeyId`
+against `/aes/keyinfo`), the clock is off by more than 75 s in either
+direction (compare against `/aes/time`), or the counter / direction /
+route in the AAD doesn't match what the server expects.
+
 ## Versioning
 
 `Sec-CIB-Envelope: 2` pins the schema and crypto choices. A future revision will bump the integer; the AAD prefix (`CIB2`) bumps in lockstep so a v3 server cannot accidentally decrypt v2 traffic and vice-versa. Devices and the server must agree on the integer before any envelope is decrypted.

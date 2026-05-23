@@ -21,6 +21,15 @@ import (
 	"github.com/jiangmuran/claude-in-box/internal/stream"
 )
 
+// maxInt returns the larger int, with a floor at 0 (so negative
+// upstream usage counters don't underflow into uint64 wrap).
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // Manager owns the set of live sessions and the disk layout under BaseDir.
 type Manager struct {
 	BaseDir   string // e.g. /var/lib/claude-in-box/sessions
@@ -181,6 +190,30 @@ func (m *Manager) Spawn(ctx context.Context, opts SpawnOptions) (*Session, error
 	// so its stdout is ANSI/TUI bytes, not JSONL.
 	go func() {
 		_ = sess.parser.RunRaw(context.Background(), master)
+	}()
+
+	// Goroutine: subscribe to our own bus, watch for usage frames, and
+	// accumulate them into the session's running totals. Lets clients
+	// (Cardputer fn+U overlay, /aes/sessions/:id/usage) read totals
+	// without having to walk the transcript themselves.
+	go func() {
+		sub := sess.bus.Subscribe(context.Background(), 0, 32)
+		defer sub.Cancel()
+		for f := range sub.Frames() {
+			if f.Kind != stream.KindUsage {
+				continue
+			}
+			var u stream.UsageData
+			if err := json.Unmarshal(f.Data, &u); err != nil {
+				continue
+			}
+			sess.AddUsage(
+				uint64(maxInt(u.Input, 0)),
+				uint64(maxInt(u.Output, 0)),
+				uint64(maxInt(u.CacheRead, 0)),
+				uint64(maxInt(u.CacheWrite, 0)),
+			)
+		}
 	}()
 
 	// Goroutine: wait for the process to exit; tear down.

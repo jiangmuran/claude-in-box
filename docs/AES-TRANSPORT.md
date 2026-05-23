@@ -184,9 +184,42 @@ The AES routes mirror small portions of the `/api/*` REST surface — only what 
 |-------|--------|------------------|----------|
 | `/aes/time` | GET | none (cleartext) | cleartext JSON, see Bootstrap |
 | `/aes/keyinfo?id=...` | GET | none (cleartext) | cleartext JSON, see Bootstrap |
+| **Sessions management** | | | |
+| `/aes/sessions` | GET | (empty) | `{ "sessions": [ ... slim entries ... ], "count": N }` |
+| `/aes/sessions` | POST | `{ "workdir":..., "model":..., "title":..., "goal":..., "resume_from":..., "bypass_permissions":bool }` | slim session entry (HTTP 201) |
+| `/aes/sessions/<id>` | GET | (empty) | slim session entry |
+| `/aes/sessions/<id>` | DELETE | `{ "signal":"term" | "kill" }` (optional) | slim session entry after kill |
+| `/aes/sessions/<id>/metadata` | PUT | `{ "title": "...", "goal": "..." }` (both optional, both nullable for clear) | slim session entry |
+| `/aes/sessions/<id>/model` | POST | `{ "model": "..." }` | `{ "id": "...", "model": "..." }` |
+| `/aes/sessions/<id>/interrupt` | POST | (empty) | `{ "id": "..." }` |
+| `/aes/sessions/<id>/usage` | GET | (empty) | `{ "id": "...", "usage": { "input":N, "output":N, "cache_read":N, "cache_write":N } }` |
+| **Sessions data plane** | | | |
 | `/aes/sessions/<id>/input` | POST | `{ "data": "...", "encoding": "utf8" }` | `{ "bytes": N }` (one-shot) |
 | `/aes/sessions/<id>/chat` | POST | `{ "since": <seq> }` (since optional) | `{ "session": "...", "last_seq": N, "messages": [...] }` (one-shot, may span multiple TypeJSON records) |
 | `/aes/sessions/<id>/events/stream` | POST | `{ "from": N, "kinds": [...], "max_records": N, "wait_ms": MS, "idle_hb_ms": MS }` | record stream: TypeFrame per `stream.Frame`, TypeHeartbeat per idle tick, terminator on close |
+
+### Slim session entry
+
+```json
+{
+  "id":         "<uuid>",
+  "title":      "Refactor sweep",
+  "goal":       "Kill 200ms p99 on /search",
+  "model":      "claude-sonnet-4-6",
+  "workdir":    "/workspace",
+  "state":      "idle" | "working" | "waiting_for_input" | "stopped" | "failed",
+  "created_at": "2026-05-23T19:00:00Z",
+  "started_at": "2026-05-23T19:00:01Z",
+  "last_seq":   1234,
+  "usage":      { "input": 4012, "output": 781, "cache_read": 0, "cache_write": 0 }
+}
+```
+
+`title` and `goal` are user-set via `PUT /aes/sessions/<id>/metadata` (or seeded by the optional `title`/`goal` fields on session create). They persist to the session's on-disk `meta.json` so they survive cib restarts. `usage` is the running total — the cctranscript watcher accumulates from every `usage` frame Claude emits.
+
+### Auth credentials at session create
+
+The AES create endpoint (`POST /aes/sessions`) is the *slim* subset of `POST /api/sessions`: it does NOT accept `api_key` / `oauth_token` / `provider_id` / `auth_mode` in the request body. The box resolves credentials from its own environment (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, or an in-container `claude auth login`). If you need to pass an upstream key from the request body, use the regular bearer-authenticated `POST /api/sessions` instead — embedded clients rarely need this.
 
 ### `events/stream` request fields
 

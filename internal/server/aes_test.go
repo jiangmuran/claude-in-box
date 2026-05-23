@@ -66,11 +66,13 @@ func (c *aesClient) do(t *testing.T, method, route string, plaintext []byte) (in
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(res.Body)
 
-	if res.StatusCode != 200 {
-		// Cleartext JSON error body, no envelope.
+	// Application-level non-200s (404 "no such session", 400 "empty
+	// data", etc.) are still envelope-wrapped — only protocol-level
+	// rejections (BadEnvelope, BadTag, ReplayedNonce, …) return
+	// cleartext JSON. Differentiate by Content-Type.
+	if res.Header.Get("Content-Type") != aespkg.ContentType {
 		return res.StatusCode, raw
 	}
-
 	respH := parseResponseHeaders(t, res, c.keyID)
 	out := decodeResponse(t, c.key, respH, route, bytes.NewReader(raw))
 	return res.StatusCode, out

@@ -597,6 +597,16 @@ AES envelope routes:
 
 | | |
 |---|---|
+| **Management** | |
+| `GET /aes/sessions` | list sessions (slim entries with title/goal/usage) |
+| `POST /aes/sessions` | create (uses box-env credentials; accepts optional title/goal/model/workdir/resume_from) |
+| `GET /aes/sessions/{id}` | one slim entry |
+| `DELETE /aes/sessions/{id}` | kill (default SIGTERM; pass `{"signal":"kill"}` for SIGKILL) |
+| `PUT /aes/sessions/{id}/metadata` | set `title` / `goal`; persists to `meta.json` |
+| `POST /aes/sessions/{id}/model` | switch model (writes `/model <x>` into the PTY) |
+| `POST /aes/sessions/{id}/interrupt` | Ctrl-C into the PTY |
+| `GET /aes/sessions/{id}/usage` | running token totals (`input`, `output`, `cache_read`, `cache_write`) |
+| **Data plane** | |
 | `POST /aes/sessions/{id}/input` | encrypted keystroke push (one-shot) |
 | `POST /aes/sessions/{id}/chat` | encrypted slim chat list, body `{"since":N}` (one-shot) |
 | `POST /aes/sessions/{id}/events/stream` | encrypted record stream of frames + heartbeats |

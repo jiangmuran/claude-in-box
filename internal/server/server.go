@@ -137,6 +137,15 @@ func (s *Server) routes() {
 	mux.HandleFunc("POST /aes/sessions/{id}/input", s.aesInput)
 	mux.HandleFunc("POST /aes/sessions/{id}/events/stream", s.aesEventsStream)
 	mux.HandleFunc("POST /aes/sessions/{id}/chat", s.aesChat)
+	// Management surface (mirrors /api/sessions/* under the AES envelope).
+	mux.HandleFunc("GET    /aes/sessions", s.aesSessionsList)
+	mux.HandleFunc("POST   /aes/sessions", s.aesSessionsCreate)
+	mux.HandleFunc("GET    /aes/sessions/{id}", s.aesSessionGet)
+	mux.HandleFunc("DELETE /aes/sessions/{id}", s.aesSessionDelete)
+	mux.HandleFunc("PUT    /aes/sessions/{id}/metadata", s.aesSessionMetadata)
+	mux.HandleFunc("POST   /aes/sessions/{id}/model", s.aesSessionModel)
+	mux.HandleFunc("POST   /aes/sessions/{id}/interrupt", s.aesSessionInterrupt)
+	mux.HandleFunc("GET    /aes/sessions/{id}/usage", s.aesSessionUsage)
 
 	// Shells (plain-bash PTYs alongside Claude Code sessions).
 	mux.Handle("GET /api/shells",

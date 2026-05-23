@@ -29,11 +29,11 @@ import (
 
 // Session is a single running (or stopped) Claude Code instance.
 type Session struct {
-	ID        string    `json:"id"`
-	Workdir   string    `json:"workdir"`
-	Model     string    `json:"model,omitempty"`
-	Effort    string    `json:"effort,omitempty"`
-	AuthMode  string    `json:"auth_mode,omitempty"`
+	ID       string `json:"id"`
+	Workdir  string `json:"workdir"`
+	Model    string `json:"model,omitempty"`
+	Effort   string `json:"effort,omitempty"`
+	AuthMode string `json:"auth_mode,omitempty"`
 	// ClaudeSessionID is claude's OWN internal session id, captured from
 	// the system.init line in the transcript JSONL. We need it for
 	// --resume because claude indexes its transcripts by this, not by
@@ -44,6 +44,22 @@ type Session struct {
 	StoppedAt       time.Time `json:"stopped_at,omitempty"`
 	ExitCode        int       `json:"exit_code,omitempty"`
 	BaseDir         string    `json:"-"` // sessions/<id>/
+
+	// User-editable display metadata, set via SetTitle / SetGoal.
+	// Persisted into meta.json so they survive cib restarts. These
+	// fields exist so embedded clients (Cardputer + similar) can show
+	// a session list with human labels without keeping their own
+	// catalog. Title defaults to the first user prompt's prefix once
+	// available; Goal stays empty unless the client sets it.
+	Title string `json:"title,omitempty"`
+	Goal  string `json:"goal,omitempty"`
+
+	// Running token + cost totals — updated whenever the transcript
+	// watcher publishes a `usage` frame. Exposed via Usage().
+	tokensIn   atomic.Uint64
+	tokensOut  atomic.Uint64
+	cacheRead  atomic.Uint64
+	cacheWrite atomic.Uint64
 
 	// HookToken is the per-session shared secret used to authenticate hook
 	// callbacks the child process makes back to /internal/hooks/<id>. Never
@@ -81,12 +97,26 @@ type Status struct {
 	Effort          string       `json:"effort,omitempty"`
 	AuthMode        string       `json:"auth_mode,omitempty"`
 	ClaudeSessionID string       `json:"claude_session_id,omitempty"`
+	Title           string       `json:"title,omitempty"`
+	Goal            string       `json:"goal,omitempty"`
 	State           stream.State `json:"state"`
 	CreatedAt       time.Time    `json:"created_at"`
 	StartedAt       time.Time    `json:"started_at,omitempty"`
 	StoppedAt       time.Time    `json:"stopped_at,omitempty"`
 	ExitCode        int          `json:"exit_code,omitempty"`
 	LastSeq         uint64       `json:"last_seq"`
+	Usage           Usage        `json:"usage"`
+}
+
+// Usage is the running token + cache totals for a session, exposed via
+// Session.Usage() and inlined into Status.Usage. Sums are accumulated
+// across the lifetime of the session; the cctranscript watcher feeds
+// them by snooping `usage` frames.
+type Usage struct {
+	Input      uint64 `json:"input"`
+	Output     uint64 `json:"output"`
+	CacheRead  uint64 `json:"cache_read"`
+	CacheWrite uint64 `json:"cache_write"`
 }
 
 // Snapshot returns the session's current externally visible state in a
@@ -101,13 +131,66 @@ func (s *Session) Status() Status {
 		Effort:          s.Effort,
 		AuthMode:        s.AuthMode,
 		ClaudeSessionID: s.ClaudeSessionID,
+		Title:           s.Title,
+		Goal:            s.Goal,
 		State:           s.State(),
 		CreatedAt:       s.CreatedAt,
 		StartedAt:       s.StartedAt,
 		StoppedAt:       s.StoppedAt,
 		ExitCode:        s.ExitCode,
 		LastSeq:         s.bus.LastSeq(),
+		Usage:           s.usageSnapshotLocked(),
 	}
+}
+
+// Usage returns the running token totals for the session.
+func (s *Session) Usage() Usage {
+	return Usage{
+		Input:      s.tokensIn.Load(),
+		Output:     s.tokensOut.Load(),
+		CacheRead:  s.cacheRead.Load(),
+		CacheWrite: s.cacheWrite.Load(),
+	}
+}
+
+func (s *Session) usageSnapshotLocked() Usage { return s.Usage() }
+
+// AddUsage accumulates a usage delta into the session's running totals
+// and rewrites meta.json so cib restarts preserve the count. Callers
+// (the cctranscript watcher) invoke this whenever Claude emits a usage
+// frame.
+func (s *Session) AddUsage(in, out, cacheRead, cacheWrite uint64) {
+	if in > 0 {
+		s.tokensIn.Add(in)
+	}
+	if out > 0 {
+		s.tokensOut.Add(out)
+	}
+	if cacheRead > 0 {
+		s.cacheRead.Add(cacheRead)
+	}
+	if cacheWrite > 0 {
+		s.cacheWrite.Add(cacheWrite)
+	}
+	_ = s.writeMeta()
+}
+
+// SetTitle sets the session's display title (user-editable) and
+// persists it to meta.json. Empty input is allowed (clears the field).
+func (s *Session) SetTitle(title string) error {
+	s.mu.Lock()
+	s.Title = title
+	s.mu.Unlock()
+	return s.writeMeta()
+}
+
+// SetGoal sets the session's goal string (a one-line summary of what
+// the user is trying to do) and persists it.
+func (s *Session) SetGoal(goal string) error {
+	s.mu.Lock()
+	s.Goal = goal
+	s.mu.Unlock()
+	return s.writeMeta()
 }
 
 // State returns the current high-level session state.

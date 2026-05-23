@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -89,7 +88,7 @@ func TestIntegration_MultiTransportSameSession(t *testing.T) {
 		out <- result{via: "rest", kinds: kinds}
 	}()
 
-	// ----- AES envelope long-poll reader -----
+	// ----- AES envelope record-stream reader -----
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -98,20 +97,10 @@ func TestIntegration_MultiTransportSameSession(t *testing.T) {
 		var fromSeq uint64
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
-			req := map[string]any{"from": fromSeq, "max": 16, "wait_ms": 250}
-			b, _ := json.Marshal(req)
-			status, body := c.do(t, "POST", "/aes/sessions/"+sess.ID+"/events/poll", b)
-			if status != 200 {
-				out <- result{via: "aes", err: fmt.Errorf("status %d: %s", status, body)}
-				return
-			}
-			var resp struct {
-				Frames  []map[string]any `json:"frames"`
-				LastSeq uint64           `json:"last_seq"`
-				Closed  bool             `json:"closed"`
-			}
-			_ = json.Unmarshal(body, &resp)
-			for _, f := range resp.Frames {
+			req, _ := json.Marshal(streamRequest{From: fromSeq, WaitMs: 250, IdleHbMs: 1000})
+			route := "/aes/sessions/" + sess.ID + "/events/stream"
+			frames := c.stream(t, route, req)
+			for _, f := range frames {
 				if k, ok := f["kind"].(string); ok {
 					seen = append(seen, k)
 					if seq, ok2 := f["seq"].(float64); ok2 && uint64(seq) > fromSeq {
@@ -119,7 +108,7 @@ func TestIntegration_MultiTransportSameSession(t *testing.T) {
 					}
 				}
 			}
-			if hasKind(seen, "stop") || resp.Closed {
+			if hasKind(seen, "stop") {
 				break
 			}
 		}
@@ -285,7 +274,9 @@ func TestIntegration_AESSecretRoundtripsViaTokenStore(t *testing.T) {
 	})
 	defer res.Body.Close()
 	var minted struct {
-		Token        struct{ ID string `json:"id"` } `json:"token"`
+		Token struct {
+			ID string `json:"id"`
+		} `json:"token"`
 		Plaintext    string `json:"plaintext"`
 		AESSecretHex string `json:"aes_secret_hex"`
 	}

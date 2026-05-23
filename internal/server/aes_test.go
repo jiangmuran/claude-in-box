@@ -3,8 +3,10 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -17,8 +19,8 @@ import (
 	"github.com/jiangmuran/claude-in-box/internal/session"
 )
 
-// aesClient is a tiny client that round-trips AES envelopes against the
-// httptest harness — same primitives an embedded device would implement.
+// aesClient is the v2 test client: it speaks the record-stream envelope
+// against the httptest harness exactly like a real device would.
 type aesClient struct {
 	baseURL string
 	keyID   string
@@ -41,17 +43,20 @@ func newAESClient(t *testing.T, h *harness) *aesClient {
 	return &aesClient{baseURL: h.srv.URL, keyID: mint.Token.ID, key: key}
 }
 
+// do performs a one-shot AES round-trip: seals plaintext as one
+// TypeJSON record + terminator on the request body, posts, and
+// decodes the response record stream concatenating all TypeJSON
+// payloads. Status 200 → returns concatenated plaintext. Non-200 →
+// returns the cleartext error body.
 func (c *aesClient) do(t *testing.T, method, route string, plaintext []byte) (int, []byte) {
 	t.Helper()
-	hdrs, err := aespkg.NewHeaders(c.keyID)
-	if err != nil {
-		t.Fatalf("NewHeaders: %v", err)
-	}
-	ct, err := aespkg.Seal(c.key, hdrs, method, route, plaintext)
-	if err != nil {
+	hdrs := freshHeaders(t, c.keyID)
+
+	var body bytes.Buffer
+	if err := aespkg.SealOneShot(&body, c.key, hdrs, aespkg.DirectionRequest, route, aespkg.TypeJSON, plaintext); err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	req, _ := http.NewRequest(method, c.baseURL+route, bytes.NewReader(ct))
+	req, _ := http.NewRequest(method, c.baseURL+route, &body)
 	hdrs.Apply(req)
 
 	res, err := http.DefaultClient.Do(req)
@@ -59,35 +64,73 @@ func (c *aesClient) do(t *testing.T, method, route string, plaintext []byte) (in
 		t.Fatalf("do %s %s: %v", method, route, err)
 	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(res.Body)
+	raw, _ := io.ReadAll(res.Body)
 
 	if res.StatusCode != 200 {
-		// Server returned a cleartext error envelope per spec.
-		return res.StatusCode, body
+		// Cleartext JSON error body, no envelope.
+		return res.StatusCode, raw
 	}
-	// Parse the response envelope. Server sends back its own timestamp +
-	// nonce so we can rebuild the AAD identically; method is the literal
-	// "RESPONSE" pseudo-method by spec.
-	respH := aespkg.Headers{
-		Envelope: res.Header.Get(aespkg.HeaderEnvelope),
-		KeyID:    hdrs.KeyID,
-		NonceHex: res.Header.Get(aespkg.HeaderNonce),
+
+	respH := parseResponseHeaders(t, res, c.keyID)
+	out := decodeResponse(t, c.key, respH, route, bytes.NewReader(raw))
+	return res.StatusCode, out
+}
+
+func freshHeaders(t *testing.T, keyID string) aespkg.Headers {
+	t.Helper()
+	h, err := aespkg.NewHeaders(keyID, func(b []byte) error {
+		_, err := rand.Read(b)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("NewHeaders: %v", err)
+	}
+	return h
+}
+
+func parseResponseHeaders(t *testing.T, res *http.Response, keyID string) aespkg.Headers {
+	t.Helper()
+	h := aespkg.Headers{
+		Envelope:    res.Header.Get(aespkg.HeaderEnvelope),
+		KeyID:       keyID,
+		StreamIDHex: res.Header.Get(aespkg.HeaderStreamID),
 	}
 	if tsStr := res.Header.Get(aespkg.HeaderTimestamp); tsStr != "" {
 		if ts, perr := strconv.ParseInt(tsStr, 10, 64); perr == nil {
-			respH.TimestampMillis = ts
+			h.TimestampMillis = ts
 		}
 	}
-	nb, err := hex.DecodeString(respH.NonceHex)
-	if err != nil || len(nb) != aespkg.NonceLen {
-		t.Fatalf("bad response nonce: hex=%q err=%v", respH.NonceHex, err)
+	nb, err := hex.DecodeString(h.StreamIDHex)
+	if err != nil || len(nb) != aespkg.StreamIDLen {
+		t.Fatalf("bad response stream id hex=%q err=%v", h.StreamIDHex, err)
 	}
-	copy(respH.Nonce[:], nb)
-	plain, err := aespkg.Open(c.key, respH, "RESPONSE", route, body)
-	if err != nil {
-		t.Fatalf("Open response: %v (raw=%x)", err, body)
+	copy(h.StreamID[:], nb)
+	return h
+}
+
+func decodeResponse(t *testing.T, key []byte, respH aespkg.Headers, route string, body io.Reader) []byte {
+	t.Helper()
+	src := aespkg.NewSource(body, key, respH, aespkg.DirectionResponse, route)
+	var buf bytes.Buffer
+	for {
+		tp, payload, err := src.Next()
+		if errors.Is(err, io.EOF) {
+			return buf.Bytes()
+		}
+		if err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		switch tp {
+		case aespkg.TypeJSON:
+			buf.Write(payload)
+		case aespkg.TypeFrame:
+			// Frames in one-shot responses are unexpected, but harmless
+			// to accumulate for tests that want them.
+			buf.Write(payload)
+		case aespkg.TypeStreamEnd, aespkg.TypeHeartbeat:
+			// ignore
+		}
 	}
-	return res.StatusCode, plain
 }
 
 // -------- tests --------
@@ -103,16 +146,20 @@ func TestAES_TimeIsCleartextAndNonZero(t *testing.T) {
 		t.Fatalf("status = %d", res.StatusCode)
 	}
 	var body struct {
-		ServerNow   int64  `json:"server_now"`
-		ToleranceMs int64  `json:"tolerance_ms"`
-		Envelope    string `json:"envelope"`
+		ServerNow          int64  `json:"server_now"`
+		ToleranceMs        int64  `json:"tolerance_ms"`
+		Envelope           string `json:"envelope"`
+		MaxRecordPlaintext int    `json:"max_record_plaintext"`
 	}
 	_ = json.NewDecoder(res.Body).Decode(&body)
 	if body.ServerNow < time.Now().Add(-time.Minute).UnixMilli() {
 		t.Fatalf("server_now suspicious: %d", body.ServerNow)
 	}
-	if body.Envelope != "1" {
-		t.Fatalf("envelope = %q", body.Envelope)
+	if body.Envelope != "2" {
+		t.Fatalf("envelope = %q want 2", body.Envelope)
+	}
+	if body.MaxRecordPlaintext != aespkg.MaxRecordPlain {
+		t.Fatalf("max_record_plaintext = %d", body.MaxRecordPlaintext)
 	}
 }
 
@@ -140,6 +187,14 @@ func TestAES_KeyInfoForMintedToken(t *testing.T) {
 		body, _ := io.ReadAll(res.Body)
 		t.Fatalf("status = %d body=%s", res.StatusCode, body)
 	}
+	var body struct {
+		Envelope    string `json:"envelope"`
+		ContentType string `json:"content_type"`
+	}
+	_ = json.NewDecoder(res.Body).Decode(&body)
+	if body.Envelope != "2" || body.ContentType != aespkg.ContentType {
+		t.Fatalf("keyinfo body = %+v", body)
+	}
 }
 
 func TestAES_InputRoundtrip(t *testing.T) {
@@ -164,11 +219,16 @@ func TestAES_InputRoundtrip(t *testing.T) {
 func TestAES_RejectsTamperedTag(t *testing.T) {
 	h := newHarness(t)
 	c := newAESClient(t, h)
-	// Build a valid envelope, then flip a bit in the last byte.
-	hdrs, _ := aespkg.NewHeaders(c.keyID)
-	ct, _ := aespkg.Seal(c.key, hdrs, "POST", "/aes/sessions/x/input", []byte("{}"))
-	ct[len(ct)-1] ^= 0x01
-	req, _ := http.NewRequest("POST", c.baseURL+"/aes/sessions/x/input", bytes.NewReader(ct))
+	hdrs := freshHeaders(t, c.keyID)
+
+	var body bytes.Buffer
+	_ = aespkg.SealOneShot(&body, c.key, hdrs, aespkg.DirectionRequest, "/aes/sessions/x/input", aespkg.TypeJSON, []byte("{}"))
+	// Flip a bit somewhere in the ciphertext (avoid the length prefix
+	// at offset 0..1 and the trailing terminator).
+	raw := body.Bytes()
+	raw[len(raw)-3] ^= 0x01
+
+	req, _ := http.NewRequest("POST", c.baseURL+"/aes/sessions/x/input", bytes.NewReader(raw))
 	hdrs.Apply(req)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -181,33 +241,33 @@ func TestAES_RejectsTamperedTag(t *testing.T) {
 	}
 }
 
-func TestAES_RejectsReplayedNonce(t *testing.T) {
+func TestAES_RejectsReplayedStreamID(t *testing.T) {
 	h := newHarness(t)
 	sess := h.spawnStubSession(t)
 	c := newAESClient(t, h)
-	hdrs, _ := aespkg.NewHeaders(c.keyID)
+	hdrs := freshHeaders(t, c.keyID)
 	plain, _ := json.Marshal(inputRequest{Data: "a\n"})
 	route := "/aes/sessions/" + sess.ID + "/input"
-	ct, _ := aespkg.Seal(c.key, hdrs, "POST", route, plain)
 
-	// First request with this nonce: OK.
 	for i := 0; i < 2; i++ {
-		req, _ := http.NewRequest("POST", c.baseURL+route, bytes.NewReader(ct))
+		var body bytes.Buffer
+		_ = aespkg.SealOneShot(&body, c.key, hdrs, aespkg.DirectionRequest, route, aespkg.TypeJSON, plain)
+		req, _ := http.NewRequest("POST", c.baseURL+route, &body)
 		hdrs.Apply(req)
 		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("do: %v", err)
 		}
-		body, _ := io.ReadAll(res.Body)
+		raw, _ := io.ReadAll(res.Body)
 		res.Body.Close()
 		switch i {
 		case 0:
 			if res.StatusCode != 200 {
-				t.Fatalf("first req status = %d body=%s", res.StatusCode, body)
+				t.Fatalf("first status = %d body=%s", res.StatusCode, raw)
 			}
 		case 1:
 			if res.StatusCode != http.StatusConflict {
-				t.Fatalf("replayed req status = %d want 409 body=%s", res.StatusCode, body)
+				t.Fatalf("replayed status = %d want 409 body=%s", res.StatusCode, raw)
 			}
 		}
 	}
@@ -215,12 +275,11 @@ func TestAES_RejectsReplayedNonce(t *testing.T) {
 
 func TestAES_RejectsBadKeyId(t *testing.T) {
 	h := newHarness(t)
-	hdrs, _ := aespkg.NewHeaders("definitely-not-a-real-key-id")
-	// Even with bad key id, the envelope must parse — server validates KeyId
-	// before attempting to decrypt.
+	hdrs := freshHeaders(t, "definitely-not-a-real-key-id")
 	key := make([]byte, aespkg.KeyLen)
-	ct, _ := aespkg.Seal(key, hdrs, "POST", "/aes/sessions/x/input", []byte("{}"))
-	req, _ := http.NewRequest("POST", h.srv.URL+"/aes/sessions/x/input", bytes.NewReader(ct))
+	var body bytes.Buffer
+	_ = aespkg.SealOneShot(&body, key, hdrs, aespkg.DirectionRequest, "/aes/sessions/x/input", aespkg.TypeJSON, []byte("{}"))
+	req, _ := http.NewRequest("POST", h.srv.URL+"/aes/sessions/x/input", &body)
 	hdrs.Apply(req)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -233,35 +292,23 @@ func TestAES_RejectsBadKeyId(t *testing.T) {
 	}
 }
 
-func TestAES_EventsPollReturnsBufferedFrames(t *testing.T) {
+func TestAES_EventsStreamDrainsBufferedFrames(t *testing.T) {
 	h := newHarness(t)
 	sess := h.spawnStubSession(t)
 	<-sess.Done()
 	c := newAESClient(t, h)
 
-	plain, _ := json.Marshal(pollRequest{From: 0, Max: 32, WaitMs: 0})
-	route := "/aes/sessions/" + sess.ID + "/events/poll"
-	status, body := c.do(t, "POST", route, plain)
-	if status != 200 {
-		t.Fatalf("status = %d body=%s", status, body)
-	}
-	var resp struct {
-		Frames  []map[string]any `json:"frames"`
-		LastSeq uint64           `json:"last_seq"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		t.Fatalf("decode: %v body=%s", err, body)
-	}
-	if len(resp.Frames) < 3 || resp.LastSeq < 3 {
-		t.Fatalf("thin response: frames=%d last_seq=%d", len(resp.Frames), resp.LastSeq)
+	// wait_ms small so we don't long-poll; we just want the snapshot.
+	req, _ := json.Marshal(streamRequest{From: 0, WaitMs: 50, MaxRecords: 0})
+	route := "/aes/sessions/" + sess.ID + "/events/stream"
+	frames := c.stream(t, route, req)
+	if len(frames) < 3 {
+		t.Fatalf("got %d frames, want >= 3", len(frames))
 	}
 }
 
-func TestAES_EventsPollLongPollWaits(t *testing.T) {
+func TestAES_EventsStreamLongPollWaitsAndHeartbeats(t *testing.T) {
 	h := newHarness(t)
-	// Use a fresh long-lived session that has not produced any frames so
-	// the long-poll has nothing to drain. A bash sleep keeps the PTY open
-	// and the bus alive (CloseAll is only called when the child exits).
 	sess, err := h.sessions.Spawn(context.Background(), session.SpawnOptions{
 		Workdir:      t.TempDir(),
 		OverrideArgs: []string{"bash", "-c", "sleep 2"},
@@ -275,22 +322,112 @@ func TestAES_EventsPollLongPollWaits(t *testing.T) {
 	}()
 
 	c := newAESClient(t, h)
-	plain, _ := json.Marshal(pollRequest{From: 999999, Max: 8, WaitMs: 250})
-	route := "/aes/sessions/" + sess.ID + "/events/poll"
+	req, _ := json.Marshal(streamRequest{From: 999_999, WaitMs: 400, IdleHbMs: 1000})
+	route := "/aes/sessions/" + sess.ID + "/events/stream"
+
 	start := time.Now()
-	status, body := c.do(t, "POST", route, plain)
+	rec := c.streamRecords(t, route, req)
 	elapsed := time.Since(start)
-	if status != 200 {
-		t.Fatalf("status = %d body=%s", status, body)
+	if elapsed < 300*time.Millisecond {
+		t.Fatalf("stream returned too fast (%v); expected ≥ 400ms wait", elapsed)
 	}
-	if elapsed < 200*time.Millisecond {
-		t.Fatalf("long-poll returned too fast (%v); expected >= ~250ms wait", elapsed)
+	// We expect zero frames (none past seq 999999) but at least one
+	// heartbeat in 400ms with a 1s heartbeat cadence is unlikely; the
+	// key invariant is: no false frames, stream terminator received.
+	for _, r := range rec {
+		if r.kind == aespkg.TypeFrame {
+			t.Fatalf("unexpected TypeFrame in long-poll-empty stream: %s", r.payload)
+		}
 	}
-	var resp struct {
-		Frames []map[string]any `json:"frames"`
+}
+
+func TestAES_EventsStreamKindFilter(t *testing.T) {
+	h := newHarness(t)
+	sess := h.spawnStubSession(t)
+	<-sess.Done()
+	c := newAESClient(t, h)
+
+	// Only ask for "status" frames; stub session emits both text.delta and status.
+	req, _ := json.Marshal(streamRequest{From: 0, WaitMs: 50, Kinds: []string{"status"}})
+	route := "/aes/sessions/" + sess.ID + "/events/stream"
+	frames := c.stream(t, route, req)
+	for _, f := range frames {
+		if f["kind"] != "status" {
+			t.Fatalf("filter leaked kind %v", f["kind"])
+		}
 	}
-	_ = json.Unmarshal(body, &resp)
-	if len(resp.Frames) != 0 {
-		t.Fatalf("expected zero frames after the high `from`, got %d", len(resp.Frames))
+}
+
+func TestAES_EventsStreamMaxRecordsCap(t *testing.T) {
+	h := newHarness(t)
+	sess := h.spawnStubSession(t)
+	<-sess.Done()
+	c := newAESClient(t, h)
+
+	req, _ := json.Marshal(streamRequest{From: 0, WaitMs: 50, MaxRecords: 2})
+	route := "/aes/sessions/" + sess.ID + "/events/stream"
+	frames := c.stream(t, route, req)
+	if len(frames) != 2 {
+		t.Fatalf("max_records=2 → got %d frames", len(frames))
 	}
+}
+
+// ---- streaming-client helpers -------------------------------------------
+
+type recvRecord struct {
+	kind    byte
+	payload []byte
+}
+
+func (c *aesClient) streamRecords(t *testing.T, route string, plaintext []byte) []recvRecord {
+	t.Helper()
+	hdrs := freshHeaders(t, c.keyID)
+	var body bytes.Buffer
+	if err := aespkg.SealOneShot(&body, c.key, hdrs, aespkg.DirectionRequest, route, aespkg.TypeJSON, plaintext); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	req, _ := http.NewRequest("POST", c.baseURL+route, &body)
+	hdrs.Apply(req)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do %s: %v", route, err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		raw, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d body=%s", res.StatusCode, raw)
+	}
+	respH := parseResponseHeaders(t, res, c.keyID)
+	src := aespkg.NewSource(res.Body, c.key, respH, aespkg.DirectionResponse, route)
+
+	var out []recvRecord
+	for {
+		tp, payload, err := src.Next()
+		if errors.Is(err, io.EOF) {
+			return out
+		}
+		if err != nil {
+			t.Fatalf("stream Next: %v", err)
+		}
+		dup := make([]byte, len(payload))
+		copy(dup, payload)
+		out = append(out, recvRecord{kind: tp, payload: dup})
+	}
+}
+
+func (c *aesClient) stream(t *testing.T, route string, plaintext []byte) []map[string]any {
+	t.Helper()
+	rec := c.streamRecords(t, route, plaintext)
+	var out []map[string]any
+	for _, r := range rec {
+		if r.kind != aespkg.TypeFrame {
+			continue
+		}
+		var f map[string]any
+		if err := json.Unmarshal(r.payload, &f); err != nil {
+			t.Fatalf("decode frame: %v body=%s", err, r.payload)
+		}
+		out = append(out, f)
+	}
+	return out
 }

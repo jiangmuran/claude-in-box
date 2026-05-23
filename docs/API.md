@@ -580,44 +580,53 @@ States: `starting → awaiting_code → verifying → done` (happy path);
 
 ## AES envelope (`/aes/*`)
 
-For embedded clients (ESP32, STM32) that cannot afford TLS. Symmetric
-AES-256-GCM with AAD-bound per-(method,route,timestamp) authentication.
-See [docs/AES-TRANSPORT.md](AES-TRANSPORT.md) for the wire format.
+For embedded clients (ESP32, STM32) that cannot afford TLS. AES-256-GCM
+record stream — the entire request and response bodies are sequences of
+independently authenticated records terminated by a sentinel, so the
+device never needs to buffer more than one record's plaintext (≤ 4 KiB).
+See [docs/AES-TRANSPORT.md](AES-TRANSPORT.md) for the full wire format.
 
 Cleartext bootstrap:
 
 | | |
 |---|---|
-| `GET /aes/time` | `{ server_now, tolerance_ms }` — for device clock sync |
+| `GET /aes/time` | `{ server_now, tolerance_ms, envelope, max_record_plaintext }` — clock sync + version |
 | `GET /aes/keyinfo?id=<KeyId>` | confirm the device's KeyId is recognized |
 
 AES envelope routes:
 
 | | |
 |---|---|
-| `POST /aes/sessions/{id}/input` | encrypted keystroke push |
-| `POST /aes/sessions/{id}/events/poll` | encrypted long-poll for frames |
-| `POST /aes/sessions/{id}/chat` | encrypted slim chat list, body `{"since":N}` |
+| `POST /aes/sessions/{id}/input` | encrypted keystroke push (one-shot) |
+| `POST /aes/sessions/{id}/chat` | encrypted slim chat list, body `{"since":N}` (one-shot) |
+| `POST /aes/sessions/{id}/events/stream` | encrypted record stream of frames + heartbeats |
 
 Each request carries 4 headers:
 
 ```
-Sec-CIB-Envelope: 1
-Sec-CIB-KeyId:    <hex string identifying the device>
-Sec-CIB-Nonce:    <24-hex-char random per-request>
-Sec-CIB-Timestamp:<ms since unix epoch>
+Sec-CIB-Envelope:  2
+Sec-CIB-KeyId:     <hex string identifying the device>
+Sec-CIB-Stream:    <32-hex-char per-request random stream id>
+Sec-CIB-Timestamp: <ms since unix epoch>
+Content-Type:      application/cib-stream-1
 ```
 
-The body is `ciphertext || GCM tag`. AAD =
-`"CIB1\n<KeyId>\n<Timestamp>\n<Method>\n<Route>\n"`.
+Each record is `[u16 BE plain_len][ciphertext || 16B tag]` followed by a
+`[u16 BE 0x0000]` terminator at the end of the body. Inner record
+plaintext is `[u8 type][u16 BE payload_len][payload]` where type is
+`0x01 (json)` for RPC bodies, `0x02 (frame)` for event-stream frames,
+`0x00 (heartbeat)` for idle keep-alives, or `0x7F (stream_end)` for
+final markers. AAD per record =
+`"CIB2\n<direction>\n<KeyId>\n<Route>\n<StreamIDHex>\n<counter>\n"`.
 
-Server responses use the same 4 headers (with a fresh nonce + the
-server's clock) and the AAD `Method` is `"RESPONSE"`. Replay window
-is 5 minutes; clock drift past half-window is rejected.
+Server responses carry their own fresh `Sec-CIB-Stream` (server-chosen,
+distinct from the request's) plus `Sec-CIB-Timestamp`. Response records
+use `direction = RESPONSE` in the AAD. Replay window is 5 minutes;
+clock drift past half-window is rejected.
 
 Errors come back as cleartext JSON with stable codes:
 `BadEnvelope`, `ClockDrift`, `ReplayedNonce`, `BadTag`,
-`UnknownKeyId`, `RouteForbidden`, `TooLarge`.
+`UnknownKeyId`, `RouteForbidden`.
 
 ---
 
@@ -640,7 +649,7 @@ documented at `internal/hooks/receiver.go`.
 ## Frame schema
 
 The structured event stream emitted on `/ws/sessions/{id}`,
-`/sse/sessions/{id}`, and `/aes/sessions/{id}/events/poll`. Every
+`/sse/sessions/{id}`, and `/aes/sessions/{id}/events/stream`. Every
 frame is:
 
 ```json

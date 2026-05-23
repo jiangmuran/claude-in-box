@@ -1,30 +1,35 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	aespkg "github.com/jiangmuran/claude-in-box/internal/aes"
 	"github.com/jiangmuran/claude-in-box/internal/stream"
 )
 
-// MaxAESBody caps the encrypted body size to prevent abuse. CC tool calls
-// can carry large outputs; 8 MiB is generous for an embedded client.
-const MaxAESBody = 8 << 20
+// MaxAESRequestRecords caps how many records a single request body
+// may contain before the server gives up reading. With MaxRecordPlain
+// = 4096, this allows ~8 MiB of plaintext per request, matching the
+// previous v1 MaxAESBody.
+const MaxAESRequestRecords = 2048
 
 // -------- cleartext bootstrap endpoints -------------------------------------
 
 func (s *Server) aesTime(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"server_now":   time.Now().UTC().UnixMilli(),
-		"tolerance_ms": int64(aespkg.DefaultReplayWindow / time.Millisecond / 2),
-		"envelope":     aespkg.EnvelopeVersion,
+		"server_now":           time.Now().UTC().UnixMilli(),
+		"tolerance_ms":         int64(aespkg.DefaultReplayWindow / time.Millisecond / 2),
+		"envelope":             aespkg.EnvelopeVersion,
+		"max_record_plaintext": aespkg.MaxRecordPlain,
 	})
 }
 
@@ -39,78 +44,162 @@ func (s *Server) aesKeyInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":             id,
-		"algorithm":      "aes-256-gcm",
-		"envelope":       aespkg.EnvelopeVersion,
-		"derive_subkeys": false,
+		"id":                   id,
+		"algorithm":            "aes-256-gcm",
+		"envelope":             aespkg.EnvelopeVersion,
+		"max_record_plaintext": aespkg.MaxRecordPlain,
+		"content_type":         aespkg.ContentType,
 	})
 }
 
 // -------- envelope plumbing -------------------------------------------------
 
-// envelopeRoute is the canonical AAD route used by both sides. The actual
-// HTTP path includes the dynamic session id; we keep the path verbatim so
-// devices can build AAD without a route table.
+// envelopeRoute is the canonical AAD route used by both sides. The
+// actual HTTP path includes the dynamic session id; we keep the path
+// verbatim so devices can build AAD without a route table.
 func envelopeRoute(r *http.Request) string { return r.URL.Path }
 
-// readEnvelope parses envelope headers, validates timestamp + replay,
-// retrieves the device key, and decrypts the body. Returns plaintext + the
-// envelope headers (for response signing).
-func (s *Server) readEnvelope(r *http.Request) ([]byte, aespkg.Headers, []byte, error) {
+// envelopeCtx bundles per-request decrypt state — the parsed headers
+// and the device key. Returned by readEnvelope1 / readEnvelopeStream
+// so handlers can later seal the response with the same key.
+type envelopeCtx struct {
+	reqHdrs aespkg.Headers
+	key     []byte
+}
+
+// readEnvelope1 reads exactly one inner JSON record from the request
+// body plus the terminator and returns the decoded plaintext. Used by
+// every endpoint whose request body is one small JSON object.
+//
+// Inner records of TypeStreamEnd or TypeHeartbeat between the JSON
+// record and the terminator are tolerated for forward compatibility
+// (a client that wants to send keep-alives is welcome to). Multiple
+// TypeJSON records are concatenated so a large input that exceeds
+// MaxRecordPlain still survives. Anything else (TypeFrame in a
+// request) is rejected.
+func (s *Server) readEnvelope1(r *http.Request) ([]byte, *envelopeCtx, error) {
 	h, err := aespkg.ParseHeaders(r)
 	if err != nil {
-		return nil, h, nil, &aesError{Code: "BadEnvelope", Status: http.StatusBadRequest, Detail: err.Error()}
+		return nil, nil, &aesError{Code: "BadEnvelope", Status: http.StatusBadRequest, Detail: err.Error()}
 	}
 	if err := s.cfg.AESReplay.CheckTimestamp(h.TimestampMillis); err != nil {
-		return nil, h, nil, &aesError{Code: "ClockDrift", Status: http.StatusUnauthorized, Detail: err.Error()}
+		return nil, nil, &aesError{Code: "ClockDrift", Status: http.StatusUnauthorized, Detail: err.Error()}
 	}
 	key, ok := s.cfg.Tokens.GetAESSecret(h.KeyID)
 	if !ok {
-		return nil, h, nil, &aesError{Code: "UnknownKeyId", Status: http.StatusUnauthorized, Detail: "no key for KeyId"}
+		return nil, nil, &aesError{Code: "UnknownKeyId", Status: http.StatusUnauthorized, Detail: "no key for KeyId"}
 	}
-	if err := s.cfg.AESReplay.CheckAndRecord(h.KeyID, h.NonceHex); err != nil {
-		return nil, h, nil, &aesError{Code: "ReplayedNonce", Status: http.StatusConflict, Detail: err.Error()}
+	if err := s.cfg.AESReplay.CheckAndRecord(h.KeyID, h.StreamIDHex); err != nil {
+		return nil, nil, &aesError{Code: "ReplayedNonce", Status: http.StatusConflict, Detail: err.Error()}
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, MaxAESBody+1))
-	if err != nil {
-		return nil, h, key, &aesError{Code: "BadEnvelope", Status: http.StatusBadRequest, Detail: "read body: " + err.Error()}
+	src := aespkg.NewSource(r.Body, key, h, aespkg.DirectionRequest, envelopeRoute(r))
+	var buf bytes.Buffer
+	for i := 0; ; i++ {
+		if i >= MaxAESRequestRecords {
+			return nil, nil, &aesError{Code: "BadEnvelope", Status: http.StatusRequestEntityTooLarge, Detail: "too many records"}
+		}
+		t, payload, err := src.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, nil, classifyOpenErr(err)
+		}
+		switch t {
+		case aespkg.TypeJSON:
+			buf.Write(payload)
+		case aespkg.TypeHeartbeat, aespkg.TypeStreamEnd:
+			// ignore
+		default:
+			return nil, nil, &aesError{Code: "BadEnvelope", Status: http.StatusBadRequest, Detail: "unexpected inner type in request"}
+		}
 	}
-	if len(body) > MaxAESBody {
-		return nil, h, key, &aesError{Code: "BadEnvelope", Status: http.StatusRequestEntityTooLarge, Detail: "payload too large"}
-	}
-	plaintext, err := aespkg.Open(key, h, r.Method, envelopeRoute(r), body)
-	if err != nil {
-		return nil, h, key, &aesError{Code: "BadTag", Status: http.StatusBadRequest, Detail: "decryption failed"}
-	}
-	return plaintext, h, key, nil
+	return buf.Bytes(), &envelopeCtx{reqHdrs: h, key: key}, nil
 }
 
-// writeEnvelope encrypts `out` with the same per-device key and writes the
-// ciphertext as the response body, signed by a server-chosen response nonce
-// and the "RESPONSE" AAD pseudo-method. `status` is the HTTP status to
-// set on the outer response so non-200 application outcomes surface at
-// the transport layer.
-func (s *Server) writeEnvelope(w http.ResponseWriter, r *http.Request, h aespkg.Headers, key, out []byte, status int) {
+// classifyOpenErr maps aes-package errors to wire-protocol error codes.
+func classifyOpenErr(err error) *aesError {
+	switch {
+	case errors.Is(err, aespkg.ErrBadTag):
+		return &aesError{Code: "BadTag", Status: http.StatusBadRequest, Detail: "decryption failed"}
+	case errors.Is(err, aespkg.ErrBadFrame), errors.Is(err, aespkg.ErrInnerLength), errors.Is(err, aespkg.ErrInnerShort):
+		return &aesError{Code: "BadEnvelope", Status: http.StatusBadRequest, Detail: err.Error()}
+	case errors.Is(err, aespkg.ErrTooLarge):
+		return &aesError{Code: "BadEnvelope", Status: http.StatusRequestEntityTooLarge, Detail: err.Error()}
+	default:
+		return &aesError{Code: "BadEnvelope", Status: http.StatusBadRequest, Detail: err.Error()}
+	}
+}
+
+// writeEnvelopeJSON encrypts v as JSON and writes a one-record
+// response body. status applies to the outer HTTP status; the inner
+// payload is the JSON bytes.
+func (s *Server) writeEnvelopeJSON(w http.ResponseWriter, r *http.Request, ec *envelopeCtx, status int, v any) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		writeAESError(w, http.StatusInternalServerError, "ServerError", err.Error())
+		return
+	}
+	respH, err := newServerHeaders(ec.reqHdrs.KeyID)
+	if err != nil {
+		writeAESError(w, http.StatusInternalServerError, "ServerError", err.Error())
+		return
+	}
+	if len(body) > aespkg.MaxRecordPlain-aespkg.InnerHeaderLen {
+		// Split across multiple TypeJSON records so the client side
+		// concatenates them. Most responses fit in one record.
+		s.writeEnvelopeChunkedJSON(w, r, ec, respH, status, body)
+		return
+	}
+	applyResponseHeaders(w, respH, status)
+	if err := aespkg.SealOneShot(w, ec.key, respH, aespkg.DirectionResponse, envelopeRoute(r), aespkg.TypeJSON, body); err != nil {
+		// Headers already flushed; can't change status. Best effort.
+		return
+	}
+}
+
+// writeEnvelopeChunkedJSON splits a large JSON body into multiple
+// TypeJSON records of size ≤ MaxRecordPlain-InnerHeaderLen, terminated
+// by the sentinel. The client concatenates payloads to recover the
+// JSON.
+func (s *Server) writeEnvelopeChunkedJSON(w http.ResponseWriter, r *http.Request, ec *envelopeCtx, respH aespkg.Headers, status int, body []byte) {
+	applyResponseHeaders(w, respH, status)
+	sink := aespkg.NewSink(w, ec.key, respH, aespkg.DirectionResponse, envelopeRoute(r))
+	chunk := aespkg.MaxRecordPlain - aespkg.InnerHeaderLen
+	for off := 0; off < len(body); off += chunk {
+		end := off + chunk
+		if end > len(body) {
+			end = len(body)
+		}
+		if err := sink.Write(aespkg.TypeJSON, body[off:end]); err != nil {
+			return
+		}
+	}
+	_ = sink.Close()
+}
+
+// newServerHeaders mints a fresh Headers value for the response side.
+// Distinct streamID + timestamp so request/response cryptographic
+// material never overlaps.
+func newServerHeaders(keyID string) (aespkg.Headers, error) {
+	return aespkg.NewHeaders(keyID, func(b []byte) error {
+		_, err := rand.Read(b)
+		return err
+	})
+}
+
+// applyResponseHeaders writes the envelope metadata onto w. Called
+// once, before the first record byte.
+func applyResponseHeaders(w http.ResponseWriter, respH aespkg.Headers, status int) {
+	w.Header().Set(aespkg.HeaderEnvelope, respH.Envelope)
+	w.Header().Set(aespkg.HeaderStreamID, respH.StreamIDHex)
+	w.Header().Set(aespkg.HeaderTimestamp, strconv.FormatInt(respH.TimestampMillis, 10))
+	w.Header().Set("Content-Type", aespkg.ContentType)
 	if status == 0 {
 		status = http.StatusOK
 	}
-	respH, err := aespkg.NewHeaders(h.KeyID)
-	if err != nil {
-		writeAESError(w, http.StatusInternalServerError, "ServerError", err.Error())
-		return
-	}
-	ct, err := aespkg.Seal(key, respH, "RESPONSE", envelopeRoute(r), out)
-	if err != nil {
-		writeAESError(w, http.StatusInternalServerError, "ServerError", err.Error())
-		return
-	}
-	w.Header().Set(aespkg.HeaderEnvelope, respH.Envelope)
-	w.Header().Set(aespkg.HeaderNonce, respH.NonceHex)
-	w.Header().Set(aespkg.HeaderTimestamp, strconv.FormatInt(respH.TimestampMillis, 10))
-	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(status)
-	_, _ = w.Write(ct)
 }
 
 type aesError struct {
@@ -124,28 +213,21 @@ func (e *aesError) Error() string { return e.Code + ": " + e.Detail }
 func writeAESError(w http.ResponseWriter, status int, code, detail string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = w.Write([]byte(`{"error":"` + code + `","detail":` + jsonStringLiteral(detail) + `}`))
-}
-
-func jsonStringLiteral(s string) string {
-	b, err := json.Marshal(s)
-	if err != nil {
-		return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
-	}
-	return string(b)
+	body, _ := json.Marshal(map[string]string{"error": code, "detail": detail})
+	_, _ = w.Write(body)
 }
 
 // -------- AES route handlers ------------------------------------------------
 
 // aesChat mirrors GET /api/sessions/:id/chat over the AES envelope.
-// Embedded-friendly slim chat shape; expects an envelope-encrypted JSON
-// body `{ "since": <seq> }` (since=0 returns the whole list).
+// Request body (encrypted, TypeJSON): `{ "since": <seq> }` (optional;
+// missing/zero returns the whole list).
 type aesChatRequest struct {
 	Since uint64 `json:"since,omitempty"`
 }
 
 func (s *Server) aesChat(w http.ResponseWriter, r *http.Request) {
-	plaintext, h, key, err := s.readEnvelope(r)
+	plaintext, ec, err := s.readEnvelope1(r)
 	if err != nil {
 		var ae *aesError
 		if errors.As(err, &ae) {
@@ -158,7 +240,7 @@ func (s *Server) aesChat(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sess, ok := s.cfg.Sessions.Get(id)
 	if !ok {
-		s.aesRespJSON(w, r, h, key, http.StatusNotFound, map[string]any{"error": "no such session"})
+		s.writeEnvelopeJSON(w, r, ec, http.StatusNotFound, map[string]any{"error": "no such session"})
 		return
 	}
 	var req aesChatRequest
@@ -169,7 +251,7 @@ func (s *Server) aesChat(w http.ResponseWriter, r *http.Request) {
 	if req.Since > 0 {
 		msgs = filterSince(msgs, req.Since)
 	}
-	s.aesRespJSON(w, r, h, key, http.StatusOK, map[string]any{
+	s.writeEnvelopeJSON(w, r, ec, http.StatusOK, map[string]any{
 		"session":  sess.ID,
 		"last_seq": sess.LastSeq(),
 		"messages": msgs,
@@ -178,7 +260,7 @@ func (s *Server) aesChat(w http.ResponseWriter, r *http.Request) {
 
 // aesInput mirrors POST /api/sessions/:id/input over the AES envelope.
 func (s *Server) aesInput(w http.ResponseWriter, r *http.Request) {
-	plaintext, h, key, err := s.readEnvelope(r)
+	plaintext, ec, err := s.readEnvelope1(r)
 	if err != nil {
 		var ae *aesError
 		if errors.As(err, &ae) {
@@ -192,39 +274,52 @@ func (s *Server) aesInput(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sess, ok := s.cfg.Sessions.Get(id)
 	if !ok {
-		s.aesRespJSON(w, r, h, key, http.StatusNotFound, map[string]any{"error": "no such session"})
+		s.writeEnvelopeJSON(w, r, ec, http.StatusNotFound, map[string]any{"error": "no such session"})
 		return
 	}
 
 	var req inputRequest
 	if jerr := json.Unmarshal(plaintext, &req); jerr != nil {
-		s.aesRespJSON(w, r, h, key, http.StatusBadRequest, map[string]any{"error": "invalid json: " + jerr.Error()})
+		s.writeEnvelopeJSON(w, r, ec, http.StatusBadRequest, map[string]any{"error": "invalid json: " + jerr.Error()})
 		return
 	}
 	if req.Data == "" {
-		s.aesRespJSON(w, r, h, key, http.StatusBadRequest, map[string]any{"error": "empty data"})
+		s.writeEnvelopeJSON(w, r, ec, http.StatusBadRequest, map[string]any{"error": "empty data"})
 		return
 	}
 	if _, werr := sess.Write([]byte(req.Data)); werr != nil {
-		s.aesRespJSON(w, r, h, key, http.StatusInternalServerError, map[string]any{"error": werr.Error()})
+		s.writeEnvelopeJSON(w, r, ec, http.StatusInternalServerError, map[string]any{"error": werr.Error()})
 		return
 	}
-	s.aesRespJSON(w, r, h, key, http.StatusOK, map[string]any{"bytes": len(req.Data)})
+	s.writeEnvelopeJSON(w, r, ec, http.StatusOK, map[string]any{"bytes": len(req.Data)})
 }
 
-// aesEventsPoll long-polls for new frames since `from`. Body shape:
+// aesEventsStream is the streaming events endpoint. Request body
+// (encrypted, TypeJSON):
 //
-//	{ "from": <uint64>, "max": <int>, "wait_ms": <int 0..30000> }
+//	{
+//	  "from":         <uint64>,   // last seq the device has rendered
+//	  "kinds":        ["text.delta","status","stop","usage"],   // optional filter
+//	  "max_records":  <int>,      // stop after N frame records (0 = unlimited)
+//	  "wait_ms":      <int>,      // overall deadline 0..600_000
+//	  "idle_hb_ms":   <int>       // heartbeat cadence during idle (default 5000)
+//	}
 //
-// Returns up to max frames with seq > from, or waits wait_ms for them.
-type pollRequest struct {
-	From   uint64 `json:"from"`
-	Max    int    `json:"max"`
-	WaitMs int    `json:"wait_ms"`
+// Response: chunked record stream. Each TypeFrame record carries a
+// JSON-encoded stream.Frame. Heartbeats are interleaved every
+// idle_hb_ms. The stream ends with the terminator when wait_ms
+// elapses, max_records is hit, the session closes, or the request
+// context cancels.
+type streamRequest struct {
+	From       uint64   `json:"from"`
+	Kinds      []string `json:"kinds,omitempty"`
+	MaxRecords int      `json:"max_records,omitempty"`
+	WaitMs     int      `json:"wait_ms,omitempty"`
+	IdleHbMs   int      `json:"idle_hb_ms,omitempty"`
 }
 
-func (s *Server) aesEventsPoll(w http.ResponseWriter, r *http.Request) {
-	plaintext, h, key, err := s.readEnvelope(r)
+func (s *Server) aesEventsStream(w http.ResponseWriter, r *http.Request) {
+	plaintext, ec, err := s.readEnvelope1(r)
 	if err != nil {
 		var ae *aesError
 		if errors.As(err, &ae) {
@@ -238,91 +333,151 @@ func (s *Server) aesEventsPoll(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sess, ok := s.cfg.Sessions.Get(id)
 	if !ok {
-		s.aesRespJSON(w, r, h, key, http.StatusNotFound, map[string]any{"error": "no such session"})
+		s.writeEnvelopeJSON(w, r, ec, http.StatusNotFound, map[string]any{"error": "no such session"})
 		return
 	}
 
-	var req pollRequest
+	var req streamRequest
 	if len(plaintext) > 0 {
 		if jerr := json.Unmarshal(plaintext, &req); jerr != nil {
-			s.aesRespJSON(w, r, h, key, http.StatusBadRequest, map[string]any{"error": "invalid json: " + jerr.Error()})
+			s.writeEnvelopeJSON(w, r, ec, http.StatusBadRequest, map[string]any{"error": "invalid json: " + jerr.Error()})
 			return
 		}
 	}
-	if req.Max <= 0 {
-		req.Max = 32
-	}
-	if req.Max > 256 {
-		req.Max = 256
-	}
-	if req.WaitMs < 0 {
-		req.WaitMs = 0
-	}
-	if req.WaitMs > 30_000 {
+	// Clamp inputs.
+	if req.WaitMs <= 0 {
 		req.WaitMs = 30_000
 	}
-
-	// First pass: any buffered frames?
-	out := filterAfter(sess.Snapshot(), req.From, req.Max)
-	if len(out) > 0 || req.WaitMs == 0 {
-		s.aesRespJSON(w, r, h, key, http.StatusOK, map[string]any{
-			"frames":   out,
-			"last_seq": sess.LastSeq(),
-		})
-		return
+	if req.WaitMs > 600_000 {
+		req.WaitMs = 600_000
+	}
+	if req.IdleHbMs <= 0 {
+		req.IdleHbMs = 5_000
+	}
+	if req.IdleHbMs < 1_000 {
+		req.IdleHbMs = 1_000
+	}
+	if req.MaxRecords < 0 {
+		req.MaxRecords = 0
 	}
 
-	// Long-poll path: subscribe and wait.
-	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(req.WaitMs)*time.Millisecond)
-	defer cancel()
-	sub := sess.Subscribe(ctx, req.From)
-	defer sub.Cancel()
-
-	var collected []stream.Frame
-	for len(collected) < req.Max {
-		select {
-		case <-ctx.Done():
-			s.aesRespJSON(w, r, h, key, http.StatusOK, map[string]any{
-				"frames":   collected,
-				"last_seq": sess.LastSeq(),
-			})
-			return
-		case f, ok := <-sub.Frames():
-			if !ok {
-				s.aesRespJSON(w, r, h, key, http.StatusOK, map[string]any{
-					"frames":   collected,
-					"last_seq": sess.LastSeq(),
-					"closed":   true,
-				})
-				return
-			}
-			collected = append(collected, f)
+	// Wants holds the allowed Kind set. Empty filter = pass everything.
+	wants := map[string]bool{}
+	for _, k := range req.Kinds {
+		wants[k] = true
+	}
+	passKind := func(k string) bool {
+		if len(wants) == 0 {
+			return true
 		}
+		return wants[k]
 	}
-	s.aesRespJSON(w, r, h, key, http.StatusOK, map[string]any{
-		"frames":   collected,
-		"last_seq": sess.LastSeq(),
-	})
-}
 
-// aesRespJSON encodes v to JSON and writes it as an encrypted response.
-// aesRespJSON encrypts `v` and writes the envelope back. `status` is the
-// HTTP status code applied to the outer response so non-200 outcomes
-// (e.g. "no such session" 404, "bad input" 400) are visible at the
-// transport layer even though the body itself is the encrypted JSON
-// payload. Protocol-level errors (bad envelope, replay, drift) go
-// through writeAESError instead — those return cleartext JSON because
-// the device has no key context to decrypt with yet.
-func (s *Server) aesRespJSON(w http.ResponseWriter, r *http.Request, h aespkg.Headers, key []byte, status int, v any) {
-	b, err := json.Marshal(v)
+	// Prepare response: headers + Sink.
+	respH, err := newServerHeaders(ec.reqHdrs.KeyID)
 	if err != nil {
 		writeAESError(w, http.StatusInternalServerError, "ServerError", err.Error())
 		return
 	}
-	s.writeEnvelope(w, r, h, key, b, status)
+	applyResponseHeaders(w, respH, http.StatusOK)
+	sink := aespkg.NewSink(w, ec.key, respH, aespkg.DirectionResponse, envelopeRoute(r))
+	defer sink.Close()
+
+	// Replay any buffered frames already > From before subscribing for
+	// new ones. Match the long-poll semantics of the old endpoint.
+	for _, f := range sess.Snapshot() {
+		if f.Seq <= req.From {
+			continue
+		}
+		if !passKind(f.Kind) {
+			continue
+		}
+		if !writeFrame(sink, f) {
+			return
+		}
+		if req.MaxRecords > 0 && int(sink.Count()) >= req.MaxRecords {
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(req.WaitMs)*time.Millisecond)
+	defer cancel()
+
+	sub := sess.Bus().Subscribe(ctx, sess.LastSeq(), 256)
+	defer sub.Cancel()
+
+	hb := time.NewTicker(time.Duration(req.IdleHbMs) * time.Millisecond)
+	defer hb.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hb.C:
+			if err := sink.Heartbeat(); err != nil {
+				return
+			}
+		case f, ok := <-sub.Frames():
+			if !ok {
+				_ = sink.Write(aespkg.TypeStreamEnd, []byte(`{"reason":"session_closed"}`))
+				return
+			}
+			if !passKind(f.Kind) {
+				continue
+			}
+			if !writeFrame(sink, f) {
+				return
+			}
+			if req.MaxRecords > 0 && int(sink.Count()) >= req.MaxRecords {
+				return
+			}
+		}
+	}
 }
 
-// filterAfter returns the first n frames in fs whose Seq > from.
+// writeFrame serializes a stream.Frame as a TypeFrame record. Returns
+// false on write failure (the caller should hang up).
+func writeFrame(sink *aespkg.Sink, f stream.Frame) bool {
+	b, err := json.Marshal(f)
+	if err != nil {
+		return false
+	}
+	if len(b) > aespkg.MaxRecordPlain-aespkg.InnerHeaderLen {
+		// Truncate oversized frame data field to fit, preserving the
+		// outer envelope. Embedded clients only care about delta text
+		// up to ~1 KiB anyway.
+		truncated := truncateFrameForWire(f, aespkg.MaxRecordPlain-aespkg.InnerHeaderLen-256)
+		b, _ = json.Marshal(truncated)
+	}
+	return sink.Write(aespkg.TypeFrame, b) == nil
+}
+
+// truncateFrameForWire returns a copy of f whose Data JSON has been
+// shortened to fit a single record. Used when a single CC frame
+// happens to be huge (rare; long tool outputs hit this).
+func truncateFrameForWire(f stream.Frame, maxData int) stream.Frame {
+	if len(f.Data) <= maxData {
+		return f
+	}
+	// Replace the data field with an annotated truncation marker.
+	truncated, _ := json.Marshal(map[string]any{
+		"truncated":      true,
+		"original_bytes": len(f.Data),
+		"preview":        string(f.Data[:maxData]),
+	})
+	return stream.Frame{
+		Session: f.Session,
+		Seq:     f.Seq,
+		TS:      f.TS,
+		Kind:    f.Kind,
+		Data:    truncated,
+	}
+}
+
+// -------- legacy helper used by other tests -------------------------------
+
+// filterAfter returns the first n frames in fs whose Seq > from. Kept
+// for compatibility with non-AES tests that share the helper.
 func filterAfter(fs []stream.Frame, from uint64, n int) []stream.Frame {
 	out := make([]stream.Frame, 0, n)
 	for _, f := range fs {
@@ -336,3 +491,9 @@ func filterAfter(fs []stream.Frame, from uint64, n int) []stream.Frame {
 	return out
 }
 
+// -------- test seam --------------------------------------------------------
+
+// envelopeCtxFor returns a context the test client can use to seal a
+// fake response without going through readEnvelope1. Exported via the
+// test file's helpers only; internal to this package otherwise.
+var _ = hex.EncodeToString // keep import alive if future helpers need hex

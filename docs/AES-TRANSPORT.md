@@ -1,10 +1,22 @@
-# AES envelope transport
+# AES envelope transport (v2 record stream)
 
-A small HTTP transport that encrypts request and response bodies with AES-256-GCM, designed for embedded devices that cannot afford a TLS stack.
+A small HTTP transport that encrypts request and response bodies with AES-256-GCM, designed for embedded devices that cannot afford a TLS stack. v2 replaces the v1 whole-body envelope with a record stream — same crypto, but the body is now a sequence of independently authenticated records terminated by a sentinel. The same wire format covers one-shot RPCs (one record per direction) and long-lived event streams (many records per direction).
 
-If the device can speak TLS, prefer the HTTPS transport. This protocol exists for STM32-class hardware and microcontrollers where TLS is too heavy.
+If the device can speak TLS, prefer the HTTPS transport. This protocol exists for STM32/ESP32-class hardware and microcontrollers where TLS is too heavy.
 
-> Status: protocol draft. Wire format may shift before v1. Pinned in `Sec-CIB-Envelope: 1`.
+> Status: protocol v2. Pinned in `Sec-CIB-Envelope: 2`. v1 is no longer supported by the server or the reference client.
+
+## Why the rewrite
+
+v1 wrapped the entire request/response body in one AES-GCM envelope. That works for tiny payloads but forces the device to buffer the whole body in RAM before verifying the tag and decrypting — fatal for a 30 KB streamed assistant reply on an ESP32-class device with ~100 KB of free heap during the AI session.
+
+v2 fixes this by:
+
+- Splitting the body into independent records (≤ 4 KiB plaintext each, each with its own GCM tag).
+- Letting the server stream records one at a time over a chunked HTTP response, with periodic heartbeat records during idle waits.
+- Allowing the device to decrypt and render each record as it arrives, never holding more than one record's plaintext in RAM.
+
+For one-shot calls (input, chat, keyinfo) v2 is exactly one record + terminator in each direction — no efficiency loss vs. v1, just a uniform parser on both ends.
 
 ## Threat model
 
@@ -13,106 +25,137 @@ What this protocol protects against:
 - Passive eavesdroppers on the link between device and box, including a network operator.
 - Replay attackers who capture a request and resend it later.
 - Tampering with request or response bodies in flight.
+- Record reordering by an on-path attacker: each record's AAD binds it to a position in the stream.
+- Cross-endpoint replay: each record's AAD binds it to a route, method/direction, and key id.
 
 What this protocol does not protect against:
 
 - An attacker who steals the device's API key. Keep it in secure storage.
-- Denial of service. Use a rate limiter in front of the AES route.
+- Forward secrecy: a compromised key decrypts all past captured traffic. Use TLS if this matters.
+- Denial of service. Use a rate limiter in front of the AES routes.
 - A compromised endpoint device. The blast radius is whatever scopes that device's token has.
-- Traffic analysis (request size, timing). Wrap in a constant-rate scheduler if that matters.
-
-If you need an authenticated link with forward secrecy, use TLS. This protocol is a deliberately small drop-in for cases where you cannot.
+- Traffic analysis (record sizes, timing). Wrap in a constant-rate scheduler if it matters.
 
 ## Wire shape
 
-A request:
+### Request
 
 ```
 POST /aes/<route> HTTP/1.1
 Host: box.example.com
-Sec-CIB-Envelope: 1
-Sec-CIB-KeyId: <device_key_id>
-Sec-CIB-Nonce: <24 hex chars>          ; 12 bytes
-Sec-CIB-Timestamp: <unix_millis>       ; current device time
-Content-Type: application/octet-stream
-Content-Length: ...
+Sec-CIB-Envelope:  2
+Sec-CIB-KeyId:     <device_key_id>
+Sec-CIB-Stream:    <32 hex chars>          ; 16 random bytes, unique per request
+Sec-CIB-Timestamp: <unix_millis>           ; current device time
+Content-Type:      application/cib-stream-1
+Content-Length:    ...
 
-<ciphertext || tag>
+<record 0> <record 1> ... <terminator>
 ```
 
-A response:
+### Response (server picks a fresh stream id)
 
 ```
 HTTP/1.1 200 OK
-Sec-CIB-Envelope: 1
-Sec-CIB-Nonce: <24 hex chars>          ; server-chosen nonce
-Content-Type: application/octet-stream
-Content-Length: ...
+Sec-CIB-Envelope:  2
+Sec-CIB-Stream:    <32 hex chars>          ; server-chosen, distinct from the request stream id
+Sec-CIB-Timestamp: <unix_millis>
+Content-Type:      application/cib-stream-1
+Transfer-Encoding: chunked                 ; for streaming responses; one-shot responses set Content-Length
 
-<ciphertext || tag>
+<record 0> <record 1> ... <terminator>
 ```
 
-Failures use HTTP 4xx / 5xx with cleartext JSON bodies and no envelope. See "Errors" below.
+The client uses the response's `Sec-CIB-Stream` (not the request's) when verifying response records. The two stream ids never overlap, so request and response can never alias each other's nonces even though both directions use the same AES key.
+
+Failures use HTTP 4xx / 5xx with cleartext JSON bodies and no envelope. See [Errors](#errors).
+
+### Record layout
+
+```
+[u16 BE plain_len][ciphertext (plain_len bytes) || 16B GCM tag]
+```
+
+`plain_len` is the plaintext length in bytes (0..4096). The ciphertext+tag block is `plain_len + 16` bytes. A length prefix of zero with no following bytes is the **terminator** and ends the stream:
+
+```
+[u16 BE 0x0000]
+```
+
+A body without a terminator is malformed; the device MUST treat the absence as `BadEnvelope`.
+
+### Inner frame (record plaintext)
+
+Every record's plaintext is:
+
+```
+[u8 type][u16 BE payload_len][payload]
+```
+
+| type | meaning      | payload                                                  |
+|------|--------------|----------------------------------------------------------|
+| 0x00 | `heartbeat`  | empty (`payload_len == 0`); keeps the connection warm    |
+| 0x01 | `json`       | UTF-8 JSON; used by all one-shot RPC bodies              |
+| 0x02 | `frame`      | UTF-8 JSON, one `stream.Frame`; used by events stream    |
+| 0x7F | `stream_end` | optional final marker before terminator; carries reason  |
+
+Servers may emit multiple `json` records in sequence (a JSON body that exceeds `MaxRecordPlain` is split at byte boundaries — the client concatenates payloads to recover it). Servers MAY emit heartbeats interleaved with any other records. Servers MUST send the terminator after their last record. Clients tolerate unknown `type` values by skipping them.
 
 ## Crypto
 
 - Algorithm: **AES-256-GCM**.
-- IV: the 12-byte value in `Sec-CIB-Nonce`. Decoded from hex.
-- Tag: 16-byte GCM tag, appended to the ciphertext.
-- Associated data (AAD): the ASCII string
+- Key: the device's 32-byte master secret (set when the token is minted via `POST /api/tokens`).
+- Nonce per record (12 bytes, derived):
 
   ```
-  CIB1\n<KeyId>\n<Timestamp>\n<Method>\n<Route>\n
+  nonce[0..8]  = streamID[0..8]      ; from Sec-CIB-Stream header
+  nonce[8..12] = counter (u32 BE)    ; 0 for first record, +1 per record
   ```
 
-  where the components are exactly the header values and the path (no host, no query). Including these in AAD binds the envelope to a request: the same ciphertext cannot be replayed against a different route or as a different method.
+  Because the stream id is fresh CSPRNG per HTTP call (16 random bytes), the `(key, nonce)` pair is unique even when many devices share a key. The 4-byte counter caps a single stream at 2^32 records — far beyond any reasonable use.
+- Tag: 16-byte GCM tag appended to the ciphertext.
+- Associated data (AAD), per record:
 
-  For responses, the AAD is the same string with `<Method>` replaced by `RESPONSE` and `<Route>` unchanged.
+  ```
+  CIB2\n<direction>\n<KeyId>\n<Route>\n<StreamIDHex>\n<Counter>\n
+  ```
 
-- Plaintext: a JSON object whose schema matches the equivalent `/api/*` route. Empty body = `{}`.
+  - `direction` is `REQUEST` for client→server records and `RESPONSE` for server→client records.
+  - `Route` is the path verbatim (no host, no query).
+  - `StreamIDHex` is the per-direction 32-char hex from the corresponding `Sec-CIB-Stream` header.
+  - `Counter` is the decimal record index in that direction.
 
-## Key derivation
-
-The control plane mints a 32-byte master device secret when the operator creates a device token via `POST /api/tokens`. The secret is returned **once** in the response and never again; the device stores it in secure storage. The token's `id` becomes the `KeyId`.
-
-If you need per-route or per-direction keys, derive at the device:
-
-```
-device_secret  = <returned master secret>      ; 32 bytes
-request_key    = HKDF-SHA256(device_secret, salt="CIB1/req", L=32)
-response_key   = HKDF-SHA256(device_secret, salt="CIB1/res", L=32)
-```
-
-The default implementation uses the same key for both directions to keep firmware small. Operators who want a cleaner split can opt in via `derive_subkeys=true` when minting the token.
+  Including direction + route + stream id + counter makes a record unforgeable across endpoints, directions, positions, or HTTP calls.
 
 ## Replay protection
 
-The server maintains a sliding window of accepted `(KeyId, Nonce)` tuples for the last `replay_window = 5 minutes`.
+The server maintains a sliding window of accepted `(KeyId, RequestStreamID)` pairs for the last `replay_window = 5 minutes` and rejects any pair seen inside the window.
 
 A request is rejected if any of the following hold:
 
 - `|server_now − Timestamp| > 5 minutes` (clock drift outside window),
-- the `(KeyId, Nonce)` pair was already used in the window,
-- the GCM tag does not verify.
+- the `(KeyId, RequestStreamID)` pair was already used in the window,
+- any record's GCM tag does not verify,
+- any record's counter is non-monotonic (this surfaces as `BadTag` because the AAD binds counter into the tag).
 
 Devices should:
 
-- generate `Nonce` from a CSPRNG, **never** reuse one,
-- keep a monotonic clock or sync via the control plane's `/aes/time` endpoint (returns server time, plaintext, see "Bootstrap"),
-- on `409 ReplayedNonce`, regenerate and retry once.
+- generate `Sec-CIB-Stream` from a CSPRNG, **never** reuse one,
+- keep a monotonic clock or sync via `/aes/time`,
+- on `409 ReplayedNonce`, generate a fresh stream id and retry once.
 
 ## Bootstrap
 
 The very first connection from a device cannot rely on prior state. Two cleartext helper endpoints exist for bootstrap:
 
-- `GET /aes/time` → `{ "server_now": <unix_millis>, "tolerance_ms": 300000 }`. Use to align clocks.
-- `GET /aes/keyinfo?id=<KeyId>` → `{ "id": ..., "algorithm": "aes-256-gcm", "derive_subkeys": false, "envelope": 1 }`. Use to detect rotation.
+- `GET /aes/time` → `{ "server_now": <unix_millis>, "tolerance_ms": 150000, "envelope": "2", "max_record_plaintext": 4096 }`. Use to align clocks and confirm v2.
+- `GET /aes/keyinfo?id=<KeyId>` → `{ "id": ..., "algorithm": "aes-256-gcm", "envelope": "2", "max_record_plaintext": 4096, "content_type": "application/cib-stream-1" }`. Use to detect rotation.
 
 These do not require auth; they reveal nothing sensitive.
 
 ## Errors
 
-When the server rejects an envelope, the response is cleartext JSON with no envelope:
+When the server rejects an envelope (or an outer transport problem fires before any record can be sealed), the response is cleartext JSON with no envelope:
 
 ```
 HTTP/1.1 4xx
@@ -121,37 +164,80 @@ Content-Type: application/json
 { "error": "<code>", "detail": "<human-readable>" }
 ```
 
-Defined codes:
-
 | code | http | meaning |
 |------|------|---------|
 | `UnknownKeyId` | 401 | `Sec-CIB-KeyId` does not match any device token. |
 | `ClockDrift` | 401 | `Timestamp` is outside the replay window. |
-| `ReplayedNonce` | 409 | `Nonce` already seen for this `KeyId` in the window. |
-| `BadTag` | 400 | GCM tag did not verify. |
-| `BadEnvelope` | 400 | Missing or malformed envelope headers. |
+| `ReplayedNonce` | 409 | `(KeyId, Sec-CIB-Stream)` already seen in the window. |
+| `BadTag` | 400 | A record's GCM tag did not verify (wrong key, AAD mismatch, reordering, …). |
+| `BadEnvelope` | 400 | Missing or malformed envelope headers / records, or terminator missing. |
+| `BadEnvelope` | 413 | Payload exceeded record-size or record-count limits. |
 | `RouteForbidden` | 403 | Token scope does not allow this route. |
 
-## Worked example
+In-stream failures (server starts emitting records and then hits an internal error mid-stream) are signalled by closing the TCP connection without writing the terminator. The device detects this as `BadEnvelope` and may retry with a fresh stream id.
+
+## Endpoint catalogue
+
+The AES routes mirror small portions of the `/api/*` REST surface — only what an embedded device actually needs.
+
+| route | method | body (encrypted) | response |
+|-------|--------|------------------|----------|
+| `/aes/time` | GET | none (cleartext) | cleartext JSON, see Bootstrap |
+| `/aes/keyinfo?id=...` | GET | none (cleartext) | cleartext JSON, see Bootstrap |
+| `/aes/sessions/<id>/input` | POST | `{ "data": "...", "encoding": "utf8" }` | `{ "bytes": N }` (one-shot) |
+| `/aes/sessions/<id>/chat` | POST | `{ "since": <seq> }` (since optional) | `{ "session": "...", "last_seq": N, "messages": [...] }` (one-shot, may span multiple TypeJSON records) |
+| `/aes/sessions/<id>/events/stream` | POST | `{ "from": N, "kinds": [...], "max_records": N, "wait_ms": MS, "idle_hb_ms": MS }` | record stream: TypeFrame per `stream.Frame`, TypeHeartbeat per idle tick, terminator on close |
+
+### `events/stream` request fields
+
+| field | type | default | notes |
+|-------|------|---------|-------|
+| `from` | uint64 | 0 | Last seq the device has already rendered. The server replays buffered frames with `seq > from` before subscribing to new ones. |
+| `kinds` | string[] | unset = all | Filter frames by `Kind`. Embedded clients should subscribe to a small set (e.g., `["text.delta","status","stop","usage"]`) to reduce bandwidth and decryption load. |
+| `max_records` | int | 0 = unlimited | Server emits at most this many TypeFrame records, then closes. |
+| `wait_ms` | int | 30000 | Overall deadline; clamped to 0..600_000. |
+| `idle_hb_ms` | int | 5000 | Cadence of TypeHeartbeat records during idle waits. Min 1000. |
+
+## Limits (numerical)
+
+- `MaxRecordPlain` = 4096 bytes plaintext per record.
+- `MaxAESRequestRecords` = 2048 records per request body (so a request body's total plaintext is bounded at ~8 MiB).
+- `replay_window` = 5 minutes.
+- `events/stream wait_ms` clamp = 600_000 ms.
+- `events/stream idle_hb_ms` floor = 1_000 ms.
+
+A device that wants smaller records may negotiate by setting `max_records` low. The server cannot send a record larger than `MaxRecordPlain` plaintext bytes; clients MAY reject larger records without decrypting.
+
+## Worked example (one-shot input)
 
 Device wants to send input "hello\n" to session `abc123`:
 
 ```
-device_secret = <stored 32 bytes>
-plaintext     = b'{"data":"hello\\n","encoding":"utf8"}'
-nonce         = csprng(12)
-timestamp     = current_millis()
-aad           = b"CIB1\n42\n" + str(timestamp) + b"\nPOST\n/aes/sessions/abc123/input\n"
-ct, tag       = AES_256_GCM_encrypt(device_secret, nonce, aad, plaintext)
-body          = ct + tag
+device_secret    = <stored 32 bytes>
+key_id           = "42"
+route            = "/aes/sessions/abc123/input"
+stream_id        = csprng(16)
+stream_id_hex    = hex(stream_id)
+timestamp        = current_millis()
+
+inner_pt         = b"\x01\x00\x24"            ; type=JSON, len=36 BE
+                 + b'{"data":"hello\\n","encoding":"utf8"}'
+
+nonce_0          = stream_id[0..8] + u32be(0)
+aad_0            = b"CIB2\nREQUEST\n42\n/aes/sessions/abc123/input\n"
+                 + stream_id_hex + b"\n0\n"
+
+ct_0, tag_0      = AES_256_GCM_encrypt(device_secret, nonce_0, aad_0, inner_pt)
+
+body             = u16be(len(inner_pt)) + ct_0 + tag_0 + b"\x00\x00"
 
 POST /aes/sessions/abc123/input HTTP/1.1
 Host: box.example.com
-Sec-CIB-Envelope: 1
-Sec-CIB-KeyId: 42
-Sec-CIB-Nonce: <hex(nonce)>
+Sec-CIB-Envelope:  2
+Sec-CIB-KeyId:     42
+Sec-CIB-Stream:    <stream_id_hex>
 Sec-CIB-Timestamp: <timestamp>
-Content-Type: application/octet-stream
+Content-Type:      application/cib-stream-1
 
 <body>
 ```
@@ -159,48 +245,69 @@ Content-Type: application/octet-stream
 Server flow:
 
 ```
-look up token by KeyId=42                                → device_secret
-verify |server_now - timestamp| <= 5 min                 → ok
-verify (42, nonce) not in replay_window                  → ok, record it
-AAD = "CIB1\n42\n" + timestamp + "\nPOST\n/aes/sessions/abc123/input\n"
-plaintext = AES_256_GCM_decrypt(device_secret, nonce, aad, ct, tag)
-parse plaintext as the /api/sessions/:id/input body
+parse headers           → key_id=42, stream_id, timestamp
+check timestamp drift   → ok
+look up token by key id → device_secret
+check replay (42, stream_id) → ok, record it
+for each record in body:
+    derive nonce, build AAD, gcm.Open → plaintext
+    if type == 0x01 (JSON): append payload to request buffer
+    if length prefix == 0:  stream ended
+parse request buffer as JSON: {"data":"hello\n","encoding":"utf8"}
 dispatch to session manager
-encrypt response with response key + server nonce
-return 200
+encrypt response with response stream id + counter 0
+write response: [u16 len][ct+tag][u16 0x0000]
 ```
 
-## Polling for stream frames
+## Worked example (events stream)
 
-Embedded devices that can only make request/response calls poll for frames instead of holding a stream:
+Device wants to subscribe to text + status frames for the next 30 s starting after seq 17:
 
 ```
-POST /aes/sessions/:id/events/poll
-  plaintext: { "from": <seq>, "max": <n>, "wait_ms": <0..30000> }
+inner_pt        = type=JSON, payload=
+                  {"from":17,"kinds":["text.delta","status","stop"],
+                   "wait_ms":30000,"idle_hb_ms":5000}
+body            = one sealed record + terminator (same shape as above)
 ```
 
-The server returns up to `n` frames newer than `from`. If none are available, it long-polls up to `wait_ms` before returning an empty array. The device updates `from = max(seq returned)` and polls again.
+The server responds with:
 
-For a typical "watchdog" device this is ~one request per few seconds. Battery cost is bounded; no socket-keepalive complexity.
+```
+HTTP/1.1 200 OK
+Sec-CIB-Envelope: 2
+Sec-CIB-Stream:   <response_stream_id_hex>
+Sec-CIB-Timestamp: <server_millis>
+Content-Type: application/cib-stream-1
+Transfer-Encoding: chunked
 
-## Reference implementation (device-side pseudocode)
+[u16 len][ct+tag]   ; record 0, type=frame, payload = JSON of stream.Frame  (text.delta "Hello, ")
+[u16 len][ct+tag]   ; record 1, type=frame, payload = ...                   (text.delta "world.")
+[u16 len][ct+tag]   ; record 2, type=heartbeat, payload empty               (idle tick after 5 s)
+[u16 len][ct+tag]   ; record 3, type=frame, payload = ...                   (status "idle")
+[u16 len][ct+tag]   ; record 4, type=frame, payload = ...                   (stop "end_turn")
+[u16 0x0000]        ; terminator (wait_ms elapsed, max_records hit, or session closed)
+```
+
+The device decrypts each record as it arrives — peak RAM is **one record's plaintext (≤ 4 KiB) plus a 16-byte tag scratch and a 12-byte nonce**.
+
+## Reference implementation
+
+The full reference C client lives in `clients/c/`. Key entry points:
 
 ```c
-// Pseudocode: ~150 lines on top of mbedtls or wolfSSL's AES-GCM module.
-// 1. cib_init(key_id, secret_32);
-// 2. cib_set_endpoint("https?://box.example.com");
-// 3. cib_call(method, route, plaintext_buf, plaintext_len,
-//             out_buf, out_buf_cap, &out_len);
-//      - builds AAD,
-//      - encrypts plaintext with AES-GCM,
-//      - sets headers,
-//      - performs HTTP request (no TLS required),
-//      - decrypts response,
-//      - returns plaintext in out_buf.
+cib_status cib_call_oneshot(cib_client *c,
+                            const char *route,
+                            const uint8_t *req_json, size_t req_len,
+                            uint8_t *resp_buf, size_t resp_cap, size_t *resp_len);
+
+cib_status cib_stream(cib_client *c,
+                      const char *route,
+                      const uint8_t *req_json, size_t req_len,
+                      cib_record_cb cb, void *ud);
 ```
 
-A full C reference, plus MicroPython and Rust variants, will land under `clients/` once the protocol is finalized.
+`cib_call_oneshot` collects every TypeJSON record into a flat buffer (heartbeats and stream-end markers are dropped). `cib_stream` invokes the callback once per record as it arrives — the callback can return non-OK to abort the stream early. See `clients/c/example.c` for a full end-to-end demo.
 
 ## Versioning
 
-`Sec-CIB-Envelope: 1` pins the schema and crypto choices. A future revision will bump the integer and may negotiate via `Sec-CIB-Envelope-Supports`. Devices and the server must agree on the integer before any envelope is decrypted.
+`Sec-CIB-Envelope: 2` pins the schema and crypto choices. A future revision will bump the integer; the AAD prefix (`CIB2`) bumps in lockstep so a v3 server cannot accidentally decrypt v2 traffic and vice-versa. Devices and the server must agree on the integer before any envelope is decrypted.

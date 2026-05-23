@@ -3,12 +3,12 @@ package aes
 import (
 	"bytes"
 	"crypto/rand"
-	"net/http"
+	"encoding/binary"
+	"errors"
+	"io"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 func randomKey(t *testing.T) []byte {
@@ -20,66 +20,22 @@ func randomKey(t *testing.T) []byte {
 	return k
 }
 
-func TestSealOpen_Roundtrip(t *testing.T) {
-	key := randomKey(t)
-	h, err := NewHeaders("device-42")
+func newH(t *testing.T, keyID string) Headers {
+	t.Helper()
+	h, err := NewHeaders(keyID, func(b []byte) error {
+		_, err := rand.Read(b)
+		return err
+	})
 	if err != nil {
 		t.Fatalf("NewHeaders: %v", err)
 	}
-	plaintext := []byte(`{"data":"hello world","encoding":"utf8"}`)
-
-	ct, err := Seal(key, h, "POST", "/aes/sessions/abc123/input", plaintext)
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-	got, err := Open(key, h, "POST", "/aes/sessions/abc123/input", ct)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if !bytes.Equal(plaintext, got) {
-		t.Fatalf("roundtrip mismatch: %q vs %q", plaintext, got)
-	}
+	return h
 }
 
-func TestSealOpen_WrongKeyFails(t *testing.T) {
-	k1, k2 := randomKey(t), randomKey(t)
-	h, _ := NewHeaders("d")
-	ct, _ := Seal(k1, h, "POST", "/aes/x", []byte("hi"))
-	if _, err := Open(k2, h, "POST", "/aes/x", ct); err == nil {
-		t.Fatal("expected Open to fail with wrong key")
-	}
-}
-
-func TestSealOpen_WrongRouteFails(t *testing.T) {
-	key := randomKey(t)
-	h, _ := NewHeaders("d")
-	ct, _ := Seal(key, h, "POST", "/aes/a", []byte("hi"))
-	if _, err := Open(key, h, "POST", "/aes/b", ct); err == nil {
-		t.Fatal("expected Open to fail when route differs (AAD binding)")
-	}
-}
-
-func TestSealOpen_WrongMethodFails(t *testing.T) {
-	key := randomKey(t)
-	h, _ := NewHeaders("d")
-	ct, _ := Seal(key, h, "POST", "/aes/x", []byte("hi"))
-	if _, err := Open(key, h, "GET", "/aes/x", ct); err == nil {
-		t.Fatal("expected Open to fail when method differs (AAD binding)")
-	}
-}
-
-func TestSealOpen_TamperedTagFails(t *testing.T) {
-	key := randomKey(t)
-	h, _ := NewHeaders("d")
-	ct, _ := Seal(key, h, "POST", "/aes/x", []byte("hi"))
-	ct[len(ct)-1] ^= 0x01
-	if _, err := Open(key, h, "POST", "/aes/x", ct); err == nil {
-		t.Fatal("expected Open to fail when tag is flipped")
-	}
-}
+// ---- envelope shape / parsing --------------------------------------------
 
 func TestParseHeaders_HappyPath(t *testing.T) {
-	src, _ := NewHeaders("dev42")
+	src := newH(t, "dev42")
 	req := httptest.NewRequest("POST", "/aes/x", nil)
 	src.Apply(req)
 
@@ -87,119 +43,363 @@ func TestParseHeaders_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseHeaders: %v", err)
 	}
-	if got.KeyID != "dev42" || got.NonceHex != src.NonceHex || got.TimestampMillis != src.TimestampMillis {
+	if got.KeyID != "dev42" || got.StreamIDHex != src.StreamIDHex || got.TimestampMillis != src.TimestampMillis {
 		t.Fatalf("parsed = %+v want %+v", got, src)
 	}
+	if got.StreamID != src.StreamID {
+		t.Fatalf("streamID raw bytes mismatch")
+	}
 }
 
-func TestParseHeaders_RejectsBadVersion(t *testing.T) {
-	src, _ := NewHeaders("d")
+func TestParseHeaders_RejectsOldVersion(t *testing.T) {
+	src := newH(t, "d")
 	req := httptest.NewRequest("POST", "/x", nil)
 	src.Apply(req)
-	req.Header.Set(HeaderEnvelope, "99")
+	req.Header.Set(HeaderEnvelope, "1")
 
 	if _, err := ParseHeaders(req); err == nil || !strings.Contains(err.Error(), "unsupported") {
-		t.Fatalf("err = %v", err)
+		t.Fatalf("expected unsupported-version err, got %v", err)
 	}
 }
 
-func TestParseHeaders_RejectsBadNonceLen(t *testing.T) {
-	src, _ := NewHeaders("d")
+func TestParseHeaders_RejectsShortStreamID(t *testing.T) {
+	src := newH(t, "d")
 	req := httptest.NewRequest("POST", "/x", nil)
 	src.Apply(req)
-	req.Header.Set(HeaderNonce, "deadbeef")
+	req.Header.Set(HeaderStreamID, "deadbeef")
 
 	if _, err := ParseHeaders(req); err == nil {
-		t.Fatal("expected error for short nonce")
+		t.Fatal("expected error for short streamID")
 	}
 }
 
-func TestParseHeaders_RejectsNonNumericTimestamp(t *testing.T) {
-	src, _ := NewHeaders("d")
-	req := httptest.NewRequest("POST", "/x", nil)
-	src.Apply(req)
-	req.Header.Set(HeaderTimestamp, "later")
-
-	if _, err := ParseHeaders(req); err == nil {
-		t.Fatal("expected error for non-numeric timestamp")
+func TestParseHeaders_RejectsMissingHeaders(t *testing.T) {
+	cases := []string{HeaderEnvelope, HeaderKeyID, HeaderStreamID, HeaderTimestamp}
+	for _, drop := range cases {
+		t.Run(drop, func(t *testing.T) {
+			src := newH(t, "d")
+			req := httptest.NewRequest("POST", "/x", nil)
+			src.Apply(req)
+			req.Header.Del(drop)
+			if _, err := ParseHeaders(req); err == nil {
+				t.Fatalf("expected error when missing %s", drop)
+			}
+		})
 	}
 }
+
+// ---- AAD + nonce ----------------------------------------------------------
 
 func TestAAD_Stable(t *testing.T) {
-	h := Headers{Envelope: "1", KeyID: "k", TimestampMillis: 12345}
-	got := string(AAD(h, "POST", "/aes/x"))
-	want := "CIB1\nk\n12345\nPOST\n/aes/x\n"
+	h := Headers{KeyID: "k", StreamIDHex: "ff00", TimestampMillis: 12345}
+	got := string(AAD(h, "REQUEST", "/aes/x", 7))
+	want := "CIB2\nREQUEST\nk\n/aes/x\nff00\n7\n"
 	if got != want {
 		t.Fatalf("AAD = %q want %q", got, want)
 	}
 }
 
-// helper for replay tests below.
-func newReq(t *testing.T, key, nonce string, tsMillis int64) *http.Request {
-	t.Helper()
-	req := httptest.NewRequest("POST", "/aes/x", nil)
-	req.Header.Set(HeaderEnvelope, "1")
-	req.Header.Set(HeaderKeyID, key)
-	req.Header.Set(HeaderNonce, nonce)
-	req.Header.Set(HeaderTimestamp, strconv.FormatInt(tsMillis, 10))
-	return req
+func TestDeriveNonce_DistinctPerCounter(t *testing.T) {
+	var sid [StreamIDLen]byte
+	if _, err := rand.Read(sid[:]); err != nil {
+		t.Fatal(err)
+	}
+	n0 := DeriveNonce(sid, 0)
+	n1 := DeriveNonce(sid, 1)
+	if n0 == n1 {
+		t.Fatal("nonce collision across counters")
+	}
+	// counter is the trailing four bytes
+	if binary.BigEndian.Uint32(n0[8:]) != 0 || binary.BigEndian.Uint32(n1[8:]) != 1 {
+		t.Fatalf("counter encoding wrong: %x %x", n0, n1)
+	}
 }
 
-func TestReplayCache_FirstAcceptsSecondRejects(t *testing.T) {
+// ---- inner framing --------------------------------------------------------
+
+func TestEncodeDecodeInner_Roundtrip(t *testing.T) {
+	payload := []byte("hello inner frame")
+	inner, err := EncodeInner(TypeJSON, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tp, got, err := DecodeInner(inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tp != TypeJSON || !bytes.Equal(got, payload) {
+		t.Fatalf("decoded type=%x payload=%q", tp, got)
+	}
+}
+
+func TestEncodeInner_RejectsOversized(t *testing.T) {
+	big := make([]byte, MaxRecordPlain)
+	if _, err := EncodeInner(TypeJSON, big); err != ErrTooLarge {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+}
+
+func TestDecodeInner_RejectsBadLength(t *testing.T) {
+	if _, _, err := DecodeInner([]byte{0x01, 0x00, 0x05, 'a', 'b'}); err != ErrInnerLength {
+		t.Fatalf("err = %v, want ErrInnerLength", err)
+	}
+}
+
+// ---- record-level Seal/Open ----------------------------------------------
+
+func TestSealOpenRecord_Roundtrip(t *testing.T) {
+	key := randomKey(t)
+	h := newH(t, "dev")
+	inner, _ := EncodeInner(TypeJSON, []byte(`{"hi":1}`))
+
+	var buf bytes.Buffer
+	if err := SealRecord(&buf, key, h, DirectionRequest, "/aes/x", 0, inner); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := OpenRecord(&buf, key, h, DirectionRequest, "/aes/x", 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tp, payload, err := DecodeInner(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tp != TypeJSON || string(payload) != `{"hi":1}` {
+		t.Fatalf("payload = %q", payload)
+	}
+}
+
+func TestSealOpenRecord_WrongCounterFails(t *testing.T) {
+	key := randomKey(t)
+	h := newH(t, "dev")
+	inner, _ := EncodeInner(TypeJSON, []byte("hi"))
+
+	var buf bytes.Buffer
+	_ = SealRecord(&buf, key, h, DirectionRequest, "/aes/x", 3, inner)
+	if _, err := OpenRecord(&buf, key, h, DirectionRequest, "/aes/x", 4, nil); err != ErrBadTag {
+		t.Fatalf("err = %v, want ErrBadTag", err)
+	}
+}
+
+func TestSealOpenRecord_WrongDirectionFails(t *testing.T) {
+	key := randomKey(t)
+	h := newH(t, "dev")
+	inner, _ := EncodeInner(TypeJSON, []byte("hi"))
+
+	var buf bytes.Buffer
+	_ = SealRecord(&buf, key, h, DirectionRequest, "/aes/x", 0, inner)
+	if _, err := OpenRecord(&buf, key, h, DirectionResponse, "/aes/x", 0, nil); err != ErrBadTag {
+		t.Fatalf("err = %v, want ErrBadTag", err)
+	}
+}
+
+func TestSealOpenRecord_WrongRouteFails(t *testing.T) {
+	key := randomKey(t)
+	h := newH(t, "dev")
+	inner, _ := EncodeInner(TypeJSON, []byte("hi"))
+
+	var buf bytes.Buffer
+	_ = SealRecord(&buf, key, h, DirectionRequest, "/aes/a", 0, inner)
+	if _, err := OpenRecord(&buf, key, h, DirectionRequest, "/aes/b", 0, nil); err != ErrBadTag {
+		t.Fatalf("err = %v, want ErrBadTag", err)
+	}
+}
+
+func TestSealOpenRecord_WrongStreamIDFails(t *testing.T) {
+	key := randomKey(t)
+	h := newH(t, "dev")
+	inner, _ := EncodeInner(TypeJSON, []byte("hi"))
+
+	var buf bytes.Buffer
+	_ = SealRecord(&buf, key, h, DirectionRequest, "/aes/x", 0, inner)
+
+	// Different streamID → different nonce AND different AAD → fail.
+	h2 := h
+	if _, err := rand.Read(h2.StreamID[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenRecord(&buf, key, h2, DirectionRequest, "/aes/x", 0, nil); err != ErrBadTag {
+		t.Fatalf("err = %v, want ErrBadTag", err)
+	}
+}
+
+func TestOpenRecord_RejectsOversizedLengthPrefix(t *testing.T) {
+	key := randomKey(t)
+	h := newH(t, "dev")
+	var buf bytes.Buffer
+	// Lie about plain length to exceed MaxRecordPlain.
+	binary.Write(&buf, binary.BigEndian, uint16(MaxRecordPlain+1))
+	if _, err := OpenRecord(&buf, key, h, DirectionRequest, "/x", 0, nil); err != ErrTooLarge {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+}
+
+func TestOpenRecord_TerminatorReturnsEOF(t *testing.T) {
+	key := randomKey(t)
+	h := newH(t, "dev")
+	var buf bytes.Buffer
+	WriteTerminator(&buf)
+	if _, err := OpenRecord(&buf, key, h, DirectionRequest, "/x", 0, nil); err != io.EOF {
+		t.Fatalf("err = %v, want io.EOF", err)
+	}
+}
+
+func TestOpenRecord_TruncatedBodyIsBadFrame(t *testing.T) {
+	key := randomKey(t)
+	h := newH(t, "dev")
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.BigEndian, uint16(16))
+	buf.Write([]byte{0x01, 0x02, 0x03}) // only 3 bytes of the promised 16+16
+	if _, err := OpenRecord(&buf, key, h, DirectionRequest, "/x", 0, nil); err != ErrBadFrame {
+		t.Fatalf("err = %v, want ErrBadFrame", err)
+	}
+}
+
+// ---- one-shot helpers -----------------------------------------------------
+
+func TestSealOpenOneShot_Roundtrip(t *testing.T) {
+	key := randomKey(t)
+	h := newH(t, "dev")
+	body := []byte(`{"data":"hi"}`)
+
+	var buf bytes.Buffer
+	if err := SealOneShot(&buf, key, h, DirectionRequest, "/aes/x/input", TypeJSON, body); err != nil {
+		t.Fatal(err)
+	}
+	tp, got, err := OpenOneShot(&buf, key, h, DirectionRequest, "/aes/x/input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tp != TypeJSON || !bytes.Equal(got, body) {
+		t.Fatalf("decoded type=%x payload=%q", tp, got)
+	}
+}
+
+func TestOpenOneShot_RejectsTrailingData(t *testing.T) {
+	key := randomKey(t)
+	h := newH(t, "dev")
+	var buf bytes.Buffer
+	inner, _ := EncodeInner(TypeJSON, []byte("hi"))
+	SealRecord(&buf, key, h, DirectionRequest, "/x", 0, inner)
+	SealRecord(&buf, key, h, DirectionRequest, "/x", 1, inner) // extra record!
+	WriteTerminator(&buf)
+
+	if _, _, err := OpenOneShot(&buf, key, h, DirectionRequest, "/x"); err != ErrBadFrame {
+		t.Fatalf("err = %v, want ErrBadFrame", err)
+	}
+}
+
+// ---- Sink / Source streaming ----------------------------------------------
+
+func TestSinkSource_StreamingRoundtrip(t *testing.T) {
+	key := randomKey(t)
+	h := newH(t, "dev")
+	var buf bytes.Buffer
+
+	sink := NewSink(&buf, key, h, DirectionResponse, "/aes/x/events/stream")
+	want := []string{"frame-0", "frame-1", "frame-2"}
+	for _, w := range want {
+		if err := sink.Write(TypeFrame, []byte(w)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sink.Heartbeat(); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	src := NewSource(&buf, key, h, DirectionResponse, "/aes/x/events/stream")
+	var got []string
+	var hb int
+	for {
+		tp, payload, err := src.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch tp {
+		case TypeFrame:
+			got = append(got, string(payload))
+		case TypeHeartbeat:
+			hb++
+			if len(payload) != 0 {
+				t.Fatalf("heartbeat carried payload %q", payload)
+			}
+		default:
+			t.Fatalf("unexpected type %x", tp)
+		}
+	}
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	if hb != 1 {
+		t.Fatalf("heartbeats = %d want 1", hb)
+	}
+}
+
+func TestSink_RejectsAfterClose(t *testing.T) {
+	key := randomKey(t)
+	h := newH(t, "dev")
+	var buf bytes.Buffer
+	sink := NewSink(&buf, key, h, DirectionResponse, "/x")
+	sink.Close()
+	if err := sink.Write(TypeJSON, []byte("x")); err == nil {
+		t.Fatal("expected error writing to closed sink")
+	}
+}
+
+func TestSource_ReorderingFails(t *testing.T) {
+	// If a relay shuffles records the AAD counter mismatch yields ErrBadTag
+	// rather than silently delivering out-of-order frames.
+	key := randomKey(t)
+	h := newH(t, "dev")
+	var direct, shuffled bytes.Buffer
+
+	sink := NewSink(&direct, key, h, DirectionResponse, "/x")
+	for i := 0; i < 3; i++ {
+		_ = sink.Write(TypeJSON, []byte{byte('a' + i)})
+	}
+	sink.Close()
+
+	// Re-emit records in order [1, 0, 2] without recomputing crypto.
+	raw := direct.Bytes()
+	// Parse: each record is [2B len][len + TagLen bytes].
+	recs := make([][]byte, 0, 3)
+	for i := 0; i < len(raw); {
+		n := int(binary.BigEndian.Uint16(raw[i : i+2]))
+		if n == 0 {
+			break
+		}
+		total := 2 + n + TagLen
+		recs = append(recs, raw[i:i+total])
+		i += total
+	}
+	if len(recs) != 3 {
+		t.Fatalf("expected 3 records, got %d", len(recs))
+	}
+	shuffled.Write(recs[1])
+	shuffled.Write(recs[0])
+	shuffled.Write(recs[2])
+	WriteTerminator(&shuffled)
+
+	src := NewSource(&shuffled, key, h, DirectionResponse, "/x")
+	if _, _, err := src.Next(); err != ErrBadTag {
+		t.Fatalf("err = %v, want ErrBadTag (reordering must be detected)", err)
+	}
+}
+
+// ---- replay cache (preserved from v1) ------------------------------------
+
+func TestReplayCache_StreamIDDuplicateRejected(t *testing.T) {
 	cache := NewReplayCache()
-	if err := cache.CheckAndRecord("dev", "deadbeef"+strings.Repeat("00", 8)); err != nil {
+	if err := cache.CheckAndRecord("dev", "abcdef0123456789abcdef0123456789"); err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	if err := cache.CheckAndRecord("dev", "deadbeef"+strings.Repeat("00", 8)); err != ErrReplay {
+	if err := cache.CheckAndRecord("dev", "abcdef0123456789abcdef0123456789"); err != ErrReplay {
 		t.Fatalf("second: err = %v, want ErrReplay", err)
-	}
-}
-
-func TestReplayCache_DifferentKeysIndependent(t *testing.T) {
-	cache := NewReplayCache()
-	n := "deadbeef" + strings.Repeat("00", 8)
-	if err := cache.CheckAndRecord("a", n); err != nil {
-		t.Fatalf("a: %v", err)
-	}
-	if err := cache.CheckAndRecord("b", n); err != nil {
-		t.Fatalf("b: %v (same nonce, different key should be ok)", err)
-	}
-}
-
-func TestReplayCache_TimestampDrift(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0)
-	cache := NewReplayCache().WithWindow(60 * time.Second)
-	cache.now = func() time.Time { return now }
-
-	// Within half-window (=30s) — ok.
-	if err := cache.CheckTimestamp(now.UnixMilli() - 20_000); err != nil {
-		t.Fatalf("close-enough timestamp rejected: %v", err)
-	}
-	// Beyond half-window — rejected.
-	if err := cache.CheckTimestamp(now.UnixMilli() - 45_000); err != ErrClockDrift {
-		t.Fatalf("far timestamp accepted: %v", err)
-	}
-}
-
-func TestReplayCache_EvictsAfterWindow(t *testing.T) {
-	base := time.Unix(1_700_000_000, 0)
-	cur := base
-	cache := NewReplayCache().WithWindow(100 * time.Millisecond)
-	cache.now = func() time.Time { return cur }
-
-	n := "deadbeef" + strings.Repeat("00", 8)
-	if err := cache.CheckAndRecord("dev", n); err != nil {
-		t.Fatalf("first: %v", err)
-	}
-	cur = base.Add(50 * time.Millisecond)
-	if err := cache.CheckAndRecord("dev", n); err != ErrReplay {
-		t.Fatalf("inside window should still replay; err = %v", err)
-	}
-	cur = base.Add(200 * time.Millisecond)
-	if err := cache.CheckAndRecord("dev", n); err != nil {
-		t.Fatalf("after window, same nonce should be ok again; err = %v", err)
-	}
-	if got := cache.Size(); got != 1 {
-		t.Fatalf("size after sweep = %d want 1", got)
 	}
 }

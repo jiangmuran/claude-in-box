@@ -16,8 +16,15 @@ INC      ?= $(shell pkg-config --cflags-only-I libcurl 2>/dev/null)
 LDLIBS   ?= -lmbedcrypto -lcurl
 
 ifeq ($(shell uname -s),Darwin)
-  # brew --prefix on Apple Silicon
-  BREW_PREFIX ?= $(shell brew --prefix 2>/dev/null)
+  # brew --prefix on Apple Silicon. Prefer mbedtls@3 (matches ESP-IDF +
+  # most embedded toolchains, which still ship the 3.x public headers
+  # like <mbedtls/gcm.h>). Fall back to a generic brew prefix.
+  MBEDTLS_PREFIX ?= $(shell brew --prefix mbedtls@3 2>/dev/null)
+  BREW_PREFIX    ?= $(shell brew --prefix 2>/dev/null)
+  ifneq ($(MBEDTLS_PREFIX),)
+    INC    += -I$(MBEDTLS_PREFIX)/include
+    LDLIBS += -L$(MBEDTLS_PREFIX)/lib
+  endif
   ifneq ($(BREW_PREFIX),)
     INC    += -I$(BREW_PREFIX)/include
     LDLIBS += -L$(BREW_PREFIX)/lib

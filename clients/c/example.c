@@ -1,5 +1,5 @@
 /*
- * example.c — minimal demo of the cib_aes C client.
+ * example.c — minimal end-to-end demo of the cib_aes v2 C client.
  *
  *   ./cib-example \
  *       --base    http://box.example.com:8080 \
@@ -7,9 +7,16 @@
  *       --secret  <64-char hex> \
  *       --session <session uuid>
  *
- * The example walks the same end-to-end flow our Go integration tests
- * walk: fetch /aes/time, send one line of input, then long-poll for new
- * frames. Print whatever comes back.
+ * Flow:
+ *   1. GET /aes/time to sync the clock.
+ *   2. POST /aes/sessions/<id>/input with `{"data":"hello\n"}` (one-shot).
+ *   3. POST /aes/sessions/<id>/events/stream and print every frame the
+ *      server emits until either the stream's wait_ms elapses or we see
+ *      a `stop` frame.
+ *
+ * The streaming reader uses a callback that fires once per record. The
+ * device only ever holds one record's worth of plaintext in RAM, which
+ * is the whole point of the v2 protocol.
  */
 
 #include "cib_aes.h"
@@ -28,6 +35,35 @@ static int parse_hex_secret(const char *s, uint8_t out[32]) {
         out[i] = (uint8_t)v;
     }
     return 0;
+}
+
+static int g_saw_stop = 0;
+
+static cib_status print_record(uint8_t type, const uint8_t *payload, size_t len, void *ud) {
+    (void)ud;
+    switch (type) {
+    case CIB_TYPE_FRAME:
+        fwrite(payload, 1, len, stdout);
+        fputc('\n', stdout);
+        fflush(stdout);
+        /* crude: stop the stream when a `"kind":"stop"` substring shows
+         * up. A real client parses the JSON. */
+        if (memmem(payload, len, "\"kind\":\"stop\"", 13)) g_saw_stop = 1;
+        if (g_saw_stop) return CIB_ERR_ABORTED;
+        break;
+    case CIB_TYPE_HEARTBEAT:
+        fprintf(stderr, "[hb]\n");
+        break;
+    case CIB_TYPE_STREAM_END:
+        fprintf(stderr, "[stream_end %.*s]\n", (int)len, (const char*)payload);
+        break;
+    case CIB_TYPE_JSON:
+        fwrite(payload, 1, len, stdout);
+        break;
+    default:
+        fprintf(stderr, "[unknown type 0x%02x len=%zu]\n", type, len);
+    }
+    return CIB_OK;
 }
 
 int main(int argc, char **argv) {
@@ -55,53 +91,48 @@ int main(int argc, char **argv) {
 
     cib_client *c = NULL;
     cib_status st = cib_client_new(base, key_id, secret, &c);
-    if (st != CIB_OK) {
-        fprintf(stderr, "cib_client_new: %d\n", st);
-        return 1;
-    }
+    if (st != CIB_OK) { fprintf(stderr, "cib_client_new: %d\n", st); return 1; }
 
-    /* 1. Bootstrap: fetch server time. */
+    /* 1. Bootstrap: clock. */
     int64_t now_ms = 0, tol_ms = 0;
     st = cib_get_time(c, &now_ms, &tol_ms);
     if (st != CIB_OK) {
         fprintf(stderr, "cib_get_time: %d\n", st);
-        cib_client_free(c);
-        curl_global_cleanup();
-        return 1;
+        goto done;
     }
     fprintf(stderr, "[box] server_now=%lld tolerance_ms=%lld\n",
             (long long)now_ms, (long long)tol_ms);
 
-    /* 2. Send one line of input. */
+    /* 2. Send a line of input (one-shot). */
     const char *line = "{\"data\":\"hello from the C client\\n\"}";
-    uint8_t resp[16 * 1024];
+    char route_in[256];
+    snprintf(route_in, sizeof(route_in), "/aes/sessions/%s/input", sess);
+    uint8_t resp[8192];
     size_t  resp_len = 0;
-    st = cib_send_input(c, sess, (const uint8_t*)line, strlen(line),
-                        resp, sizeof(resp) - 1, &resp_len);
+    st = cib_call_oneshot(c, route_in,
+                          (const uint8_t*)line, strlen(line),
+                          resp, sizeof(resp) - 1, &resp_len);
     if (st != CIB_OK) {
-        fprintf(stderr, "cib_send_input: %d\n", st);
-        cib_client_free(c);
-        curl_global_cleanup();
-        return 1;
+        fprintf(stderr, "cib_call_oneshot(input): %d\n", st);
+        goto done;
     }
     resp[resp_len] = '\0';
     fprintf(stderr, "[box] input ack: %s\n", (char*)resp);
 
-    /* 3. Long-poll for events. The first call gets the buffered frames
-     *    (or waits up to 5s for new ones). */
-    const char *poll = "{\"from\":0,\"max\":32,\"wait_ms\":5000}";
-    st = cib_poll_events(c, sess, (const uint8_t*)poll, strlen(poll),
-                         resp, sizeof(resp) - 1, &resp_len);
-    if (st != CIB_OK) {
-        fprintf(stderr, "cib_poll_events: %d\n", st);
-        cib_client_free(c);
-        curl_global_cleanup();
-        return 1;
+    /* 3. Stream events. wait_ms=10s; the callback aborts on stop frame. */
+    const char *stream_req = "{\"from\":0,\"wait_ms\":10000,\"idle_hb_ms\":2000}";
+    char route_stream[256];
+    snprintf(route_stream, sizeof(route_stream), "/aes/sessions/%s/events/stream", sess);
+    st = cib_stream(c, route_stream,
+                    (const uint8_t*)stream_req, strlen(stream_req),
+                    print_record, NULL);
+    if (st != CIB_OK && st != CIB_ERR_ABORTED) {
+        fprintf(stderr, "cib_stream: %d\n", st);
+        goto done;
     }
-    resp[resp_len] = '\0';
-    fprintf(stdout, "%s\n", (char*)resp);
 
+done:
     cib_client_free(c);
     curl_global_cleanup();
-    return 0;
+    return st == CIB_OK || st == CIB_ERR_ABORTED ? 0 : 1;
 }

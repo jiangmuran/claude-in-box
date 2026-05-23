@@ -135,7 +135,7 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /aes/time", s.aesTime)
 	mux.HandleFunc("GET /aes/keyinfo", s.aesKeyInfo)
 	mux.HandleFunc("POST /aes/sessions/{id}/input", s.aesInput)
-	mux.HandleFunc("POST /aes/sessions/{id}/events/poll", s.aesEventsPoll)
+	mux.HandleFunc("POST /aes/sessions/{id}/events/stream", s.aesEventsStream)
 	mux.HandleFunc("POST /aes/sessions/{id}/chat", s.aesChat)
 
 	// Shells (plain-bash PTYs alongside Claude Code sessions).

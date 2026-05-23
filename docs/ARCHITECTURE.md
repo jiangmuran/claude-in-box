@@ -231,7 +231,9 @@ All three views read from the same frame bus; switching between them does not in
 
 In `headless` mode this layer is absent; `/` returns 404, and only `/api/*`, `/ws/*`, `/sse/*`, `/aes/*`, `/v1/messages*`, and `/openai/v1/chat/completions` are served.
 
-### 12. REST API (sketch)
+### 12. REST API (summary)
+
+For the full reference with bodies, status codes, and examples see [`docs/API.md`](API.md). Highlights:
 
 ```
 POST   /api/auth/login                 { token }           → cookie / 200

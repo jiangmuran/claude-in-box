@@ -19,12 +19,17 @@ import (
 	"github.com/jiangmuran/claude-in-box/internal/session"
 )
 
+// Note: trailing `sleep 0.5` keeps the PTY open long enough that tests
+// can write into the session after spawn. Without it, `cat <<EOF` exits
+// in ~1ms on fast CI runners and subsequent writes hit a closed PTY
+// (observed as a 500 response in TestAES_RejectsReplayedStreamID).
 const stubScript = `cat <<'EOF'
 {"type":"text_delta","text":"hello "}
 {"type":"text_delta","text":"world"}
 {"type":"usage","usage":{"input":12,"output":34}}
 {"type":"message_stop","stop_reason":"end_turn"}
-EOF`
+EOF
+sleep 0.5`
 
 type harness struct {
 	srv      *httptest.Server

@@ -35,21 +35,20 @@ The control plane owns the session manager, the hooks runtime, the streaming bri
 
 ### 3. Session manager
 
-Each Claude Code session is a child process attached to a pseudo-terminal (PTY). **Claude Code is always launched in interactive REPL mode** — never with `--print` — because subscription-quota billing only applies to interactive runs. Hook-driven structured event capture (§5) is what makes interactive mode equivalent to "structured output" for our purposes.
+Each Claude Code session is a child process attached to a pseudo-terminal (PTY). **Claude Code is always launched in interactive REPL mode** — never with `--print` — because subscription-quota billing only applies to interactive runs. Interactive REPL does not emit `--output-format stream-json`; typed content frames come from the transcript-watcher path described in §6 instead.
 
 Spawn command shape:
 
 ```
 claude
-  --output-format stream-json
-  --include-hook-events
   --dangerously-skip-permissions          # off if requested
-  --model <model>
-  [--resume <session_id>]
-  --settings <per-session merged settings.json>
+  [--model <model>]
+  [--effort <low|medium|high|xhigh|max>]
+  [--resume <claude_session_id>]
+  --settings <per-session merged settings.json>   # contains our http hooks
 ```
 
-`--output-format stream-json --include-hook-events` is layered on top **if** Claude Code supports it in interactive mode; if it does not, hooks alone carry the structured channel and the raw PTY carries the visible output.
+The PTY stream is consumed in byte mode (`Parser.RunRaw`) and surfaced as `pty.raw` frames; nothing else is parsed off the terminal.
 
 Responsibilities:
 
@@ -64,10 +63,10 @@ Responsibilities:
 - `interrupt(session_id)` — sends the equivalent of `Ctrl+C`/Esc to the session.
 - `kill(session_id, signal)`.
 - Lifecycle persistence: each session has a directory under `sessions/<id>/` containing:
-  - `meta.json` — workdir, env, model, auth mode, created_at, stopped_at, ...
-  - `transcript.jsonl` — append-only structured frames (§6) for resume and audit; CC's own `~/.claude/projects/<hash>/<id>.jsonl` is the upstream source of truth.
-  - `output.log` — raw PTY capture for terminal replay
-  - `hooks/` — per-session hook overrides
+  - `meta.json` — workdir, model, effort, auth mode, title, goal, running usage totals, `claude_session_id`, `created_at`, `stopped_at`, …
+  - `.claude/settings.json` — the per-session HTTP-hooks file we point `claude --settings` at; HMAC-signed callbacks land on the internal hook receiver.
+
+  Conversation history lives in Claude Code's own JSONL at `~/.claude/projects/<encoded-workdir>/<claude_session_id>.jsonl`, which the transcript watcher tails (§6). We do not maintain a parallel transcript on disk.
 
 PTY backing supports TUI features (cursor, colors, line editing) and gives the input simulator a stable surface. Multiple clients can attach to one session simultaneously; input from each is serialized through the manager so writes do not tear.
 
@@ -127,7 +126,7 @@ Every frame carries `session`, `seq`, `ts`, `kind`, `data`. Frame ordering is gl
 | `hook` | A hook fired | `name`, `event`, `payload`, `result?` |
 | `pty.raw` | Optional opaque PTY bytes | `data` (off by default; on for terminal-style clients) |
 
-Parsing strategy: we run Claude Code with structured output where it supports it (and capture hook events on the side) so we never need to grep the TTY for tool calls. The `pty.raw` channel exists only for clients that want to render the original terminal UI verbatim.
+Parsing strategy: we capture lifecycle events from hook callbacks and content frames from the transcript watcher — never by parsing the TTY. The `pty.raw` channel exists only for clients that want to render the original terminal UI verbatim.
 
 ### 7. Transports
 

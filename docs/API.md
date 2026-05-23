@@ -722,7 +722,7 @@ frame is:
 | `ask.question` | `{ question, options? }` | claude asked the user something |
 | `hook` | `{ event, name, payload }` | a hook fired (from internal receiver) |
 | `pty.raw` | `{ bytes }` | (optional) raw PTY bytes — only for the terminal view |
-| `cc.raw` | `{ line }` | raw JSONL line from Claude's stream-json output |
+| `cc.raw` | `{ original }` | reserved for an unrecognised line if Claude Code is ever run with `--output-format stream-json`; the current interactive REPL spawn never emits this kind |
 | `stop` | `{ reason }` | session ended |
 
 `seq` is monotonic per session. Pass `?from=<last-seq>` on any

@@ -15,23 +15,35 @@ func TestSpawn_EchoBack(t *testing.T) {
 		t.Fatalf("Spawn: %v", err)
 	}
 
-	id, ch, _ := s.Subscribe(8)
+	// Subscribe returns the scrollback buffer too — the shell command
+	// (`echo …; exit 0`) often completes in <1ms and the bytes land in
+	// the buffer BEFORE this goroutine subscribes. Both the scrollback
+	// AND the live channel feed `buf` so the race is no longer flaky.
+	id, ch, scrollback := s.Subscribe(8)
 	defer s.Unsubscribe(id)
 
 	var buf bytes.Buffer
-	deadline := time.After(3 * time.Second)
-	for {
-		select {
-		case chunk, ok := <-ch:
-			if !ok {
+	buf.Write(scrollback)
+
+	if strings.Contains(buf.String(), "hello-from-shell") {
+		goto done
+	}
+
+	{
+		deadline := time.After(3 * time.Second)
+		for {
+			select {
+			case chunk, ok := <-ch:
+				if !ok {
+					goto done
+				}
+				buf.Write(chunk)
+			case <-deadline:
+				t.Fatalf("timed out waiting for output; got %q", buf.String())
+			}
+			if strings.Contains(buf.String(), "hello-from-shell") {
 				goto done
 			}
-			buf.Write(chunk)
-		case <-deadline:
-			t.Fatalf("timed out waiting for output; got %q", buf.String())
-		}
-		if strings.Contains(buf.String(), "hello-from-shell") {
-			goto done
 		}
 	}
 done:

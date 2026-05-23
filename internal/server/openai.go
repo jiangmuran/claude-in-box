@@ -194,11 +194,27 @@ func (s *Server) openaiChatStream(w http.ResponseWriter, r *http.Request, antReq
 	// Open with the role chunk OpenAI clients expect.
 	emit(chunk(map[string]any{"role": "assistant"}, nil))
 
+	// Close-events helper. Once the role chunk has been emitted, OpenAI
+	// SDK iterators will hang forever if we don't also emit a finish
+	// chunk + [DONE] terminator on every exit path, including errors.
+	streamOpen := true
+	closeStream := func(finishReason string) {
+		if !streamOpen {
+			return
+		}
+		streamOpen = false
+		emit(chunk(map[string]any{}, finishReason))
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}
+	defer func() { closeStream("stop") }()
+
 	startSeq := sess.LastSeq()
 	sub := sess.Bus().Subscribe(ctx, startSeq, 512)
 	defer sub.Cancel()
 	if _, werr := sess.Write([]byte(normalizePromptForCR(prompt))); werr != nil {
 		emitErr(fmt.Sprintf("write: %v", werr))
+		closeStream("error")
 		return
 	}
 
@@ -207,6 +223,7 @@ func (s *Server) openaiChatStream(w http.ResponseWriter, r *http.Request, antReq
 		select {
 		case <-ctx.Done():
 			emitErr("turn timeout")
+			closeStream("error")
 			return
 		case f, ok := <-sub.Frames():
 			if !ok {
@@ -253,7 +270,9 @@ func (s *Server) openaiChatStream(w http.ResponseWriter, r *http.Request, antReq
 		}
 	}
 
-	// Finish chunk + OpenAI's [DONE] terminator.
+	// Normal-path close — the deferred closeStream("stop") would do this
+	// too but emitting here keeps the happy-path in the source.
+	streamOpen = false
 	emit(chunk(map[string]any{}, "stop"))
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()

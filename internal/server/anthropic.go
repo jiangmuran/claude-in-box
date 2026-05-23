@@ -270,12 +270,32 @@ func (s *Server) anthropicMessagesStream(w http.ResponseWriter, r *http.Request,
 		"content_block": map[string]any{"type": "text", "text": ""},
 	})
 
+	// Close-events helper. Once message_start has been emitted, SDK
+	// iterators will hang forever if we don't also emit content_block_stop
+	// + message_delta + message_stop — even on error paths.
+	streamOpen := true
+	closeStream := func(stopReason string) {
+		if !streamOpen {
+			return
+		}
+		streamOpen = false
+		emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
+		emit("message_delta", map[string]any{
+			"type":  "message_delta",
+			"delta": map[string]any{"stop_reason": stopReason, "stop_sequence": nil},
+			"usage": map[string]any{"output_tokens": 0},
+		})
+		emit("message_stop", map[string]any{"type": "message_stop"})
+	}
+	defer func() { closeStream("end_turn") }()
+
 	// Subscribe BEFORE writing so we don't miss the first text.delta.
 	startSeq := sess.LastSeq()
 	sub := sess.Bus().Subscribe(ctx, startSeq, 512)
 	defer sub.Cancel()
 	if _, werr := sess.Write([]byte(normalizePromptForCR(prompt))); werr != nil {
 		emitErr(fmt.Sprintf("write: %v", werr))
+		closeStream("error")
 		return
 	}
 
@@ -285,6 +305,7 @@ func (s *Server) anthropicMessagesStream(w http.ResponseWriter, r *http.Request,
 		select {
 		case <-ctx.Done():
 			emitErr("turn timeout")
+			closeStream("error")
 			return
 		case f, ok := <-sub.Frames():
 			if !ok {
@@ -345,7 +366,9 @@ func (s *Server) anthropicMessagesStream(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	// Anthropic's close events.
+	// Anthropic's close events. Output token count uses the actual
+	// accumulated text so the SDK sees a reasonable usage value.
+	streamOpen = false
 	emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
 	emit("message_delta", map[string]any{
 		"type":  "message_delta",

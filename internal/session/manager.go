@@ -331,6 +331,17 @@ func (m *Manager) envFor(opts SpawnOptions, additional ...string) []string {
 			}
 			delete(overrides, "CLAUDE_CODE_OAUTH_TOKEN")
 		}
+		// Claude Code 2.1.36+ sends an x-anthropic-billing-header that
+		// rotates per request (cc_version, cc_entrypoint, cch=<rotating>).
+		// Third-party Anthropic-compatible proxies (jmrai.net etc.) key
+		// their prompt cache by that header — so every request looks
+		// different and cache hit rate craters. Setting
+		// CLAUDE_CODE_ATTRIBUTION_HEADER=0 makes claude stop sending the
+		// rotating header, restoring cache behavior on the upstream.
+		// The user can still override via ExtraEnv to opt out.
+		if thirdParty && !hasEnvKV(env, "CLAUDE_CODE_ATTRIBUTION_HEADER=") && !hasEnvKV(opts.ExtraEnv, "CLAUDE_CODE_ATTRIBUTION_HEADER=") {
+			overrides["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
+		}
 	case "subscription":
 		if opts.OAuthToken != "" {
 			overrides["CLAUDE_CODE_OAUTH_TOKEN"] = opts.OAuthToken

@@ -10,7 +10,12 @@ import (
 
 func TestSpawn_EchoBack(t *testing.T) {
 	m := NewManager(t.TempDir())
-	s, err := m.Spawn(SpawnOptions{Cmd: "bash", Args: []string{"-c", "echo hello-from-shell; exit 0"}})
+	// Leading `sleep 0.1` lets the test subscribe before bytes arrive;
+	// trailing `sleep 0.1` keeps the PTY open after the echo so reap's
+	// pty.Close doesn't race the reader's first Read on fast CI runners
+	// (observed: bash exited before reader had read once → bytes were
+	// stuck in the PTY buffer and the close discarded them).
+	s, err := m.Spawn(SpawnOptions{Cmd: "bash", Args: []string{"-c", "sleep 0.1; echo hello-from-shell; sleep 0.1; exit 0"}})
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}

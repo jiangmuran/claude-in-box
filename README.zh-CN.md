@@ -18,9 +18,9 @@
 
 ---
 
-## 这是什么
+## 概览
 
-`claude-in-box` 把一整套按需开发环境 + [Claude Code](https://www.anthropic.com/claude-code) 打包进一个 Docker 容器,通过**一个端口**对外暴露为 Web 服务。
+`claude-in-box` 将一套完整的开发环境与 [Claude Code](https://www.anthropic.com/claude-code) 一起封装进单个 Docker 容器,通过**一个端口**对外提供 Web 服务。
 
 你把它跑在一台真服务器上(云主机、独立服务器、家用大机)。容器里的 Claude Code **必须以完整的 interactive REPL 模式运行**—— 这是硬约束,因为只有 interactive 模式才会消耗 Anthropic 订阅配额;`--print` / 无头调用只接受 API key。然后你通过网络从任何地方驱动这个 interactive Claude Code。
 
@@ -33,7 +33,7 @@
 - 一个 Web UI,对同一个会话提供**三种并行视图** —— 原生虚拟终端、网页化的结构化 Claude 驱动、面向开发者的 API 检视器;
 - 结构化事件流:文本增量、工具调用、todo 更新、token 用量、状态变化、停止原因、模型元数据,全部以 JSON 帧通过 WebSocket / SSE 推出,**绝不靠刮 TTY**;
 - 会话生命周期:新建、attach、resume、kill、运行中切模型;
-- 每个会话独立选择计费方式:Anthropic 订阅(在自己电脑上 `claude setup-token` 拿到长 token),或者 API key;
+- 每个会话独立选择计费方式:Anthropic 订阅(通过 Web UI 内置的 OAuth 登录流程在容器里完成),或者 API key;
 - 同一个端口上多种封装的 Web API:我们自己的帧 schema(REST + WS + SSE + AES 信封),以及计划中的 **Anthropic 兼容**(`/v1/messages`)和 **OpenAI 兼容**(`/openai/v1/chat/completions`)适配器,让已有 SDK 把 base URL 指过来就能用;
 - 透明 SOCKS5 层,容器内所有出站流量经一个上游代理重定向,无需逐工具配置;
 - 可编程 hooks,在所有生命周期事件触发;
@@ -47,9 +47,9 @@
 3.  docker run —— 容器在 :8080 上拉起控制面,把 Web UI + REST + WS +
     SSE + AES 信封全部多路复用到同一个端口。
 4.  打开 Web 面板,用启动时生成的主 API key 登入。
-5.  选择本次会话怎么计费:Anthropic 订阅(粘贴你在自己电脑上
-    `claude setup-token` 拿到的长 OAuth token),或者 Anthropic API key。
-    每个会话各自独立选择。
+5.  在 Web UI 完成一次登录,选择本次部署的计费方式:
+    Anthropic 订阅(由统一鉴权 modal 驱动一次容器内 OAuth 登录),
+    或者 API key。登录态会持久化,新会话自动沿用。
 6.  仪表盘可见:活跃会话、token 消耗、累计工作时间、当前模型、hook 活动。
 7.  新建会话。面板对同一会话提供三种并行视图:
        (a) 原生虚拟终端 —— xterm.js 绑定到 Claude Code 的 PTY,就是
@@ -85,9 +85,9 @@
 
 | 模式 | 适用场景 | 方式 |
 |------|----------|------|
-| Anthropic 订阅(个人用户默认) | 已经付了 Claude Pro / Max,想走订阅。 | 在你自己电脑上跑 `claude setup-token` 拿到长 OAuth token;通过 `CLAUDE_CODE_OAUTH_TOKEN` env 或者 API 按会话注入容器。 |
-| API key | 程序化、CI、按 token 计费,或者一台 box 给多个人各自带 key。 | 容器上设 `ANTHROPIC_API_KEY`,或按会话注入。 |
-| 容器内 `claude /login` 交互登录 | 给不想折腾 `claude setup-token` 的用户。 | **已 ship**。Web UI 统一鉴权 modal 端到端驱动 PTY-backed OAuth(start → 粘 code → finish)。 |
+| Anthropic 订阅(个人用户默认) | 已付 Claude Pro / Max,希望会话在订阅配额下计费。 | 在 Web UI 鉴权 modal 中登录 —— 它会在容器内驱动 PTY 化的 `claude /login` 流程,凭据持久化到挂载的 `~/.claude/` 卷中。 |
+| API key | 程序化场景、CI、按 token 计费,或多人共用一台 box 各带自己的 key。 | 容器上设 `ANTHROPIC_API_KEY`,或在 Web UI 配置 provider 后按会话选择。 |
+| 长 OAuth token(遗留) | 早于交互式登录上线时的无头部署方式。**注意:** `claude setup-token` 签发的 token 在 2026-06-15 之后并入独立的 Agent SDK 计费配额,不再走交互式订阅。新部署优先用上面的交互式登录。 | 通过 `CLAUDE_CODE_OAUTH_TOKEN` env 注入。 |
 | 第三方 Anthropic 兼容 host | 想指向 jmrai.net 或自己的代理(不同 `api_host` 但同 API)。 | 鉴权 modal 里内置 **jmrai.net 预设**(粘 key 保存即用),也支持自定义 host/key/label。 |
 | 互斥清除 | 订阅与 API key 不能同时活动。 | 配置 API provider 时擦除 claude.ai 凭据;走订阅登录时删除所有 providers。服务端强制。 |
 
@@ -210,7 +210,7 @@ docker run -d --name claude-box \
   -p 8080:8080 \
   --cap-add NET_ADMIN \
   -e CIB_AUTH_TOKEN=$(openssl rand -hex 32) \
-  -e CLAUDE_CODE_OAUTH_TOKEN=cclo_...                `# 在你电脑上 \`claude setup-token\` 拿到` \
+  `# 可选无头凭据:ANTHROPIC_API_KEY 或 CLAUDE_CODE_OAUTH_TOKEN(遗留)` \
   -e CIB_PROXY_URL=socks5://user:pass@proxy.example:1080 \
   -e CIB_SERVICES=redis,postgres                     `# 自启内置服务` \
   -e CIB_PORT_RANGE=9000-9019 -p 9000-9019:9000-9019 `# 可选:把容器内服务暴露到宿主端口` \

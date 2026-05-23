@@ -18,13 +18,13 @@
 
 ---
 
-## What is this
+## Overview
 
-`claude-in-box` packages a full on-demand development environment together with [Claude Code](https://www.anthropic.com/claude-code) into a single Docker container, then exposes it as a web service over **one port**.
+`claude-in-box` packages a full development environment together with [Claude Code](https://www.anthropic.com/claude-code) into a single Docker container and exposes it as a web service over **one port**.
 
-You run it on a real server (cloud VM, dedicated host, beefy home machine). Inside the container, Claude Code runs in **full interactive REPL mode** — that is non-negotiable, because that is the only mode in which the Anthropic subscription quota is consumed; `--print` / headless invocations only accept API keys. You then drive that interactive Claude Code from anywhere over the network.
+The container is designed to run on a server (cloud VM, dedicated host, or a workstation that stays on). Inside, Claude Code runs in **interactive REPL mode**, which is a hard requirement: only interactive mode consumes the Anthropic subscription quota, while `--print` / headless invocations require an API key. The control plane then exposes that interactive session over the network.
 
-What you get:
+Capabilities:
 
 - a sandboxed Linux box preloaded with a real dev environment — Node 22, Python 3 (with FastAPI + Uvicorn + Pydantic + httpx + rich + ipython), Go 1.25, Rust, plus `nginx`, `redis-server`, `postgresql`, and the Docker CLI/daemon — and Claude Code itself;
 - common tools out of the box: ripgrep, fd, bat, htop, tmux, vim, nano, openssh-client, less, file, tree, jq, curl, wget, build-essential, make;
@@ -33,15 +33,15 @@ What you get:
 - a Web UI that surfaces three concurrent views on the same session — raw virtual terminal, web-native structured Claude driver, and an API inspector for developers;
 - structured event streaming: text deltas, tool calls, todo updates, token usage, status changes, stop reasons, model metadata — all available as JSON frames over WebSocket or SSE, never screen-scraped from the TTY;
 - session lifecycle controls: create, attach, resume, kill, switch models on the fly;
-- two ways to bill Claude per session: an Anthropic subscription (via a long-lived OAuth token you mint on your laptop with `claude setup-token`), or an API key;
+- two ways to bill Claude per session: an Anthropic subscription (signed in via the in-container OAuth flow driven by the Web UI), or an API key;
 - a Web API in multiple wrappings off one port: our native frame schema (REST + WS + SSE + AES envelope), **Anthropic-compatible** `POST /v1/messages` and **OpenAI-compatible** `POST /openai/v1/chat/completions` adapters with full incremental SSE streaming so existing SDKs can target the box as a drop-in, plus an MCU-friendly slim chat (`/sse/sessions/{id}/chat` or `/aes/sessions/{id}/chat`) and a one-shot `/api/sessions/{id}/send` send-and-wait endpoint;
 - a transparent SOCKS5 layer so every outbound packet from inside the box can be rerouted through one upstream proxy without per-tool config;
 - programmable hooks on every lifecycle event;
 - a single multi-arch image (`linux/amd64`, `linux/arm64`) that boots equally cleanly on x86 servers and Ampere-class arm64 hosts.
 
-The point: stop tying Claude Code to one workstation. Put it on a real server you already own, then use it from anywhere with the transport and API shape that fits the client.
+The intent is to decouple Claude Code from a single workstation: deploy it once on a server, then access it from any device using whichever transport and API shape fits the client.
 
-## The ideal workflow
+## Typical workflow
 
 ```
 1.  Pick an environment image: prebuilt :latest or your own custom build on
@@ -50,9 +50,10 @@ The point: stop tying Claude Code to one workstation. Put it on a real server yo
 3.  docker run — the container boots the control plane on :8080, multiplexing
     Web UI + REST + WS + SSE + AES envelope on the same port.
 4.  Open the web panel. Authenticate with the master API key minted at boot.
-5.  Choose how to bill Claude this session: an Anthropic subscription (paste
-    the long-lived OAuth token you got with `claude setup-token` on your
-    laptop), or an Anthropic API key. The choice is per-session.
+5.  Sign in once via the Web UI to choose how Claude is billed:
+    an Anthropic subscription (the unified auth modal drives an
+    OAuth flow inside the container) or an API key. The setting
+    persists; new sessions inherit it.
 6.  Dashboard shows: live sessions, token consumption, wall-clock work time,
     current model, hook activity.
 7.  Create a new session. The panel gives you three concurrent views on it:
@@ -73,7 +74,7 @@ The point: stop tying Claude Code to one workstation. Put it on a real server yo
     `docs/API.md`).
 ```
 
-That is the loop the rest of this README is here to explain.
+The remainder of this document describes each layer in more depth.
 
 ## Capabilities
 
@@ -93,9 +94,9 @@ That is the loop the rest of this README is here to explain.
 
 | Mode | When to use | How |
 |------|-------------|-----|
-| Anthropic subscription (default for personal use) | You already pay for Claude Pro / Max and want it billed there. | On your laptop, run `claude setup-token` to mint a long-lived OAuth token. Pass it as `CLAUDE_CODE_OAUTH_TOKEN` to the container, or per-session via the API. |
-| API key | Programmatic, CI, paying per token, or sharing the box across people who all have their own keys. | Set `ANTHROPIC_API_KEY` on the container, or per-session via the API. |
-| In-container interactive `claude /login` | Convenience for users who do not want to fuss with `claude setup-token`. | Shipped. The Web UI's unified auth modal drives the PTY-backed OAuth flow end-to-end (start → paste code → finish). |
+| Anthropic subscription (default for personal use) | You pay for Claude Pro / Max and want sessions billed against that subscription. | Sign in from the Web UI's auth modal — it drives a PTY-backed `claude /login` flow inside the container and persists the credentials in the mounted `~/.claude/` volume. |
+| API key | Programmatic, CI, per-token billing, or sharing one box across users that bring their own keys. | Set `ANTHROPIC_API_KEY` on the container, or configure a provider in the Web UI for per-session selection. |
+| Long-lived OAuth token (legacy) | Useful for headless CI before the interactive flow shipped. **Note:** `claude setup-token`-issued tokens move to a separate Agent SDK billing quota after 2026-06-15 and no longer consume the interactive subscription. Prefer the interactive flow above. | Pass as `CLAUDE_CODE_OAUTH_TOKEN`. |
 | Third-party Anthropic-compatible host | You want to point at jmrai.net or your own proxy with a different `api_host`. | Built-in `jmrai.net` preset in the auth modal — paste your key, save, done. Custom host/key/label also supported. |
 | Mutual exclusion | Subscription and API-key paths cannot both be active at once. | Configuring an API provider wipes claude.ai credentials; logging into subscription deletes all configured providers. Enforced server-side. |
 
@@ -219,7 +220,7 @@ docker run -d --name claude-box \
   -p 8080:8080 \
   --cap-add NET_ADMIN \
   -e CIB_AUTH_TOKEN=$(openssl rand -hex 32) \
-  -e CLAUDE_CODE_OAUTH_TOKEN=cclo_...               `# from \`claude setup-token\` on your laptop` \
+  `# optional headless creds: ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN (legacy)` \
   -e CIB_PROXY_URL=socks5://user:pass@proxy.example:1080 \
   -e CIB_SERVICES=redis,postgres                    `# auto-start bundled services` \
   -e CIB_PORT_RANGE=9000-9019 -p 9000-9019:9000-9019 `# optional: expose in-container services on host ports` \
@@ -251,7 +252,7 @@ Implementing the AES envelope on a microcontroller: see [`docs/AES-TRANSPORT.md`
 
 ## Contributing
 
-Open an issue if something resonates, you hit a bug, or you have a target client device with constraints worth designing around. PRs welcome — small focused changes preferred over sweeping refactors.
+Issues and pull requests are welcome. For client-device integrations with specific constraints, opening an issue first makes alignment easier. Small, focused changes are preferred over broad refactors.
 
 ## License
 

@@ -75,17 +75,17 @@ PTY backing supports TUI features (cursor, colors, line editing) and gives the i
 
 Two modes coexist; subscription is the default for personal use because it is what most users already pay for.
 
-**Subscription via long-lived OAuth token (M1–M2 primary path).**
+**Subscription via in-container interactive `claude /login` (primary path).**
 
-- The user runs `claude setup-token` on their laptop (a one-time command) and is given a long-lived OAuth token.
-- That token is passed to the container as `CLAUDE_CODE_OAUTH_TOKEN`, or per-session via the create API.
-- Claude Code inside the container, running interactive, treats this as a logged-in session and bills against the Anthropic subscription. No `~/.claude/.credentials.json` refresh-token gymnastics inside the container.
-- `~/.claude/` is still mounted as a volume so transcripts, settings, and MCP config persist across restarts.
+- The Web UI's unified auth modal drives a PTY-backed `claude /login` inside the container end-to-end (start → paste code → finish).
+- Credentials land in the mounted `~/.claude/.credentials.json` and persist across restarts; transcripts and MCP config persist alongside in the same volume.
+- This is the recommended path for new deployments.
 
-**Subscription via in-container interactive `claude /login`.**
+**Subscription via long-lived OAuth token (legacy).**
 
-- For users who do not want to handle `claude setup-token` on the host.
-- The Web UI's unified auth modal drives a PTY-backed `claude /login` flow inside the container end-to-end (start → paste code → finish).
+- Pre-dates the in-container interactive flow. Useful for fully headless deployments where the operator cannot open the Web UI to log in.
+- The user mints the token with `claude setup-token` on a workstation and passes it as `CLAUDE_CODE_OAUTH_TOKEN`.
+- **Note:** tokens issued by `claude setup-token` move to a separate Agent SDK billing quota after 2026-06-15 and stop drawing against the interactive subscription. The interactive flow above is preferred for new deployments; this path is kept for compatibility.
 
 **API key.**
 

@@ -81,8 +81,14 @@ func TestStartTranscriptWatcher_FindsAndTails(t *testing.T) {
 	}
 
 	close(sess.done)
-	if sess.transcriptStop != nil {
-		sess.transcriptStop()
+	// Read transcriptStop under sess.mu — startTranscriptWatcher
+	// installs it from a background goroutine and the race detector
+	// catches an unsynchronised read here.
+	sess.mu.Lock()
+	stopFn := sess.transcriptStop
+	sess.mu.Unlock()
+	if stopFn != nil {
+		stopFn()
 	}
 	sess.bus.CloseAll()
 	wg.Wait()
@@ -90,7 +96,10 @@ func TestStartTranscriptWatcher_FindsAndTails(t *testing.T) {
 	if !sawText {
 		t.Fatalf("watcher never published text.delta containing claude's message; bus kinds: %v", kindList(sess.bus.Snapshot()))
 	}
-	if sess.transcriptStop == nil {
+	sess.mu.Lock()
+	installed := sess.transcriptStop != nil || stopFn != nil
+	sess.mu.Unlock()
+	if !installed {
 		t.Fatalf("transcriptStop never installed — auto-discovery path didn't fire")
 	}
 }

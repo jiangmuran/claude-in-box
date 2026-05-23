@@ -11,7 +11,6 @@
 </p>
 
 <p align="center">
-  <a href="#%E7%8A%B6%E6%80%81"><img src="https://img.shields.io/badge/status-early%20WIP-orange" alt="状态:早期 WIP"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-D97757" alt="MIT 协议"></a>
   <img src="https://img.shields.io/badge/docker-multi--arch-2496ED?logo=docker&logoColor=white" alt="docker 多架构">
   <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-success" alt="amd64 / arm64">
@@ -27,7 +26,7 @@
 
 你能得到:
 
-- 一个沙箱化的 Linux 盒子,直接装好一整套真实开发环境 —— Node 20、Python 3(含 FastAPI + Uvicorn + Pydantic + httpx + rich + ipython)、Go 1.25、Rust,以及 `nginx`、`redis-server`、`postgresql`、Docker CLI/daemon —— 加上 Claude Code 本体;
+- 一个沙箱化的 Linux 盒子,装好一整套开发环境 —— Node 22、Python 3(含 FastAPI + Uvicorn + Pydantic + httpx + rich + ipython)、Go 1.25、Rust,以及 `nginx`、`redis-server`、`postgresql`、Docker CLI/daemon —— 加上 Claude Code 本体;
 - 常用工具直接可用:ripgrep、fd、bat、htop、tmux、vim、nano、openssh-client、less、file、tree、jq、curl、wget、build-essential、make;
 - 内置服务默认不自启;在 `docker run` 时传 `CIB_SERVICES=redis,postgres,nginx`(可以是 `redis`、`postgres`、`nginx`、`docker` 的任意子集),entrypoint 会先把它们起好再起控制面;
 - 在虚拟 TTY 里运行的一个或多个会话,默认 bypass-permission 模式(容器本身就是边界,逐工具弹权限只会成为噪音);
@@ -127,16 +126,16 @@ Hooks 是一等公民。控制面在每个会话启动时安装自己的 `http` 
 
 | 封装 | 路径前缀 | 适用客户端 | 加密 | 鉴权 | 状态 |
 |------|----------|------------|------|------|------|
-| 原生帧 REST + WS | `/api/*`、`/ws/*` | 浏览器、手机、服务器、我们自己的 Web UI | TLS(nginx 终止) | Bearer token(主/设备级) | M1 |
-| 原生帧 SSE | `/sse/*` | 廉价单向客户端、日志拉取 | TLS(nginx 终止) | Bearer | M1 |
-| HTTP + AES 信封 | `/aes/*` | 没 TLS 栈的裸机 MCU(ESP32 / STM32) | AES-256-GCM 设备级密钥 | API key + 单请求 nonce | M1 |
-| Anthropic 兼容 API | `/v1/messages`、`stream=true` SSE | 已有 Claude SDK 客户端 —— base URL 指过来就能用 | TLS(nginx 终止) | Bearer / API key | **已 ship**(per-request 临时 session,incremental SSE) |
-| OpenAI 兼容 API | `/openai/v1/chat/completions` | 已有 OpenAI SDK 客户端 | TLS(nginx 终止) | Bearer / API key | **已 ship**(per-request 临时 session,incremental SSE) |
-| 精简 chat(嵌入式) | `/api/sessions/{id}/chat` REST、`/sse/sessions/{id}/chat` SSE、`/aes/sessions/{id}/chat` over AES | 只有几百 KB RAM 的 MCU | TLS / AES 信封 | Bearer / AES key | **已 ship** |
-| 一发即等 | `POST /api/sessions/{id}/send` | 非流式客户端一次 HTTP 完成一回合 | TLS(nginx 终止) | Bearer | **已 ship** |
-| 端口映射 | `GET/POST/DELETE /api/ports/*` | 通过 socat 把容器内服务暴露到宿主端口 | TLS(nginx 终止) | Bearer | **已 ship**(`docker run` 时设 `CIB_PORT_RANGE`) |
-| MQTT 桥 | — | IoT 总线接入 | TLS 或预共享 | 按主题 | Roadmap |
-| 原始 TCP 帧 | — | 最小占用极限场景 | AES-GCM | API key | Roadmap |
+| 原生帧 REST + WS | `/api/*`、`/ws/*` | 浏览器、手机、服务器、Web UI | TLS(nginx 终止) | Bearer token(主/设备级) |
+| 原生帧 SSE | `/sse/*` | 廉价单向客户端、日志拉取 | TLS(nginx 终止) | Bearer |
+| HTTP + AES 信封 | `/aes/*` | 没 TLS 栈的裸机 MCU(ESP32 / STM32) | AES-256-GCM 设备级密钥,v2 record-stream | API key + 单请求 nonce |
+| Anthropic 兼容 API | `/v1/messages`(可选 `stream=true` SSE) | `@anthropic-ai/sdk` 等 —— base_url 指过来就能用 | TLS(nginx 终止) | Bearer / API key |
+| OpenAI 兼容 API | `/openai/v1/chat/completions` | `openai` / `openai-node` 等 —— OpenAI 线协议 | TLS(nginx 终止) | Bearer / API key |
+| 精简 chat(嵌入式) | `/api/sessions/{id}/chat`、`/sse/sessions/{id}/chat`、`/aes/sessions/{id}/chat` | 只有几百 KB RAM 的 MCU | TLS / AES 信封 | Bearer / AES key |
+| 一发即等 | `POST /api/sessions/{id}/send` | 非流式客户端一次 HTTP 完成一回合 | TLS(nginx 终止) | Bearer |
+| 端口映射 | `/api/ports/*` | 通过 socat 把容器内服务暴露到宿主端口(`docker run` 时设 `CIB_PORT_RANGE`) | TLS(nginx 终止) | Bearer |
+| MQTT 桥 | — | IoT 总线接入(待建) | TLS 或预共享 | 按主题 |
+| 原始 TCP 帧 | — | 最小占用极限场景(待建) | AES-GCM | API key |
 
 Anthropic / OpenAI 兼容适配器是**同一会话总线上的格式适配器**,而不是平行的运行时。它们让已经会说这些 API 的工具把请求路过来,直接用上订阅配额支撑的 Claude。
 
@@ -164,13 +163,9 @@ HTTPS 部署提供 [nginx 配置模板](deploy/nginx.conf.template):终止 TLS�
 - 参考 Python 客户端放在 [`clients/python/`](clients/python/)(~250 LOC,纯 stdlib + `cryptography`,带 5 个测试)。
 - Rust 参考客户端是下一项待办。
 
-## 状态
-
-非常早期。目前仓库里有项目名、logo、架构草图、nginx 模板和 AES 信封协议规范。实现按下方里程碑推进。想跟进可以 Star/Watch。
-
 详细设计见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
-## 计划架构
+## 架构
 
 ```
                                                        ┌────────────────────────────────────────────┐
@@ -213,24 +208,26 @@ HTTPS 部署提供 [nginx 配置模板](deploy/nginx.conf.template):终止 TLS�
 ## 快速上手
 
 ```bash
-# 待发布,命令形态预览,容器尚未发布。
 docker run -d --name claude-box \
   -p 8080:8080 \
   --cap-add NET_ADMIN \
   -e CIB_AUTH_TOKEN=$(openssl rand -hex 32) \
-  -e CLAUDE_CODE_OAUTH_TOKEN=cclo_...      # 在你电脑上 `claude setup-token` 拿到
+  -e CLAUDE_CODE_OAUTH_TOKEN=cclo_...                `# 在你电脑上 \`claude setup-token\` 拿到` \
   -e CIB_PROXY_URL=socks5://user:pass@proxy.example:1080 \
-  -e CIB_SERVICES=redis,postgres \         # 自启内置服务
+  -e CIB_SERVICES=redis,postgres                     `# 自启内置服务` \
+  -e CIB_PORT_RANGE=9000-9019 -p 9000-9019:9000-9019 `# 可选:把容器内服务暴露到宿主端口` \
   -v $(pwd)/workspace:/workspace \
   -v $(pwd)/sessions:/var/lib/claude-in-box/sessions \
   -v $(pwd)/claude-home:/home/coder/.claude \
-  -v /var/run/docker.sock:/var/run/docker.sock \   # 可选:与宿主 Docker 通信
+  -v /var/run/docker.sock:/var/run/docker.sock       `# 可选:与宿主 Docker 通信` \
   ghcr.io/jiangmuran/claude-in-box:latest
 
 open http://localhost:8080
 ```
 
-API-only 模式(不在 `/` 提供 Web UI,只暴露 `/api/*` `/ws/*` `/sse/*` `/aes/*`)—— 同一个镜像,只是一个 runtime 开关:
+主 token(`CIB_AUTH_TOKEN`)是首次进 Web UI 时贴的那个;后续通过 Web UI mint 设备级 token。
+
+API-only 模式(不在 `/` 提供 Web UI,只暴露 `/api/*` `/ws/*` `/sse/*` `/aes/*` `/v1/*` `/openai/v1/*`)—— 同一个镜像,只是一个 runtime 开关:
 
 ```bash
 docker run -d --restart unless-stopped \
@@ -247,7 +244,7 @@ docker run -d --restart unless-stopped \
 
 ## 贡献
 
-设计还在收敛,暂未开放外部贡献。如果有目标客户端设备的限制需要考虑,欢迎开 issue 让我们提前对齐。
+欢迎 Issue 与 PR。小而集中的改动比大重构更受欢迎。如果你想接的客户端设备有特殊约束,提个 Issue 一起想。
 
 ## 协议
 

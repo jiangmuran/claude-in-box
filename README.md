@@ -11,7 +11,6 @@
 </p>
 
 <p align="center">
-  <a href="#status"><img src="https://img.shields.io/badge/status-early%20WIP-orange" alt="status: early WIP"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-D97757" alt="MIT licensed"></a>
   <img src="https://img.shields.io/badge/docker-multi--arch-2496ED?logo=docker&logoColor=white" alt="docker multi-arch">
   <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-success" alt="amd64 / arm64">
@@ -27,7 +26,7 @@ You run it on a real server (cloud VM, dedicated host, beefy home machine). Insi
 
 What you get:
 
-- a sandboxed Linux box preloaded with a real, batteries-included dev environment — Node 20, Python 3 (with FastAPI + Uvicorn + Pydantic + httpx + rich + ipython), Go 1.25, Rust, plus `nginx`, `redis-server`, `postgresql`, and the Docker CLI/daemon — and Claude Code itself;
+- a sandboxed Linux box preloaded with a real dev environment — Node 22, Python 3 (with FastAPI + Uvicorn + Pydantic + httpx + rich + ipython), Go 1.25, Rust, plus `nginx`, `redis-server`, `postgresql`, and the Docker CLI/daemon — and Claude Code itself;
 - common tools out of the box: ripgrep, fd, bat, htop, tmux, vim, nano, openssh-client, less, file, tree, jq, curl, wget, build-essential, make;
 - bundled services do not auto-start; pass `CIB_SERVICES=redis,postgres,nginx` (any subset of `redis`, `postgres`, `nginx`, `docker`) and the entrypoint brings them up before the control plane;
 - one or many virtual-TTY sessions running inside it, each a live Claude Code conversation in bypass-permission mode (the container is the sandbox, so per-tool prompts are unnecessary friction);
@@ -131,18 +130,18 @@ Hooks are first-class. The control plane installs its own `http`-type hooks at s
 
 The container exposes exactly one TCP port. Everything is multiplexed onto it through HTTP routing. Each capability is wrapped in multiple shapes so very different clients can use the same backend with the format they prefer.
 
-| Wrapping | Path prefix | Best for | Crypto | Auth | Status |
-|----------|-------------|----------|--------|------|--------|
-| Native frame REST + WS | `/api/*`, `/ws/*` | Browser, phone, server, our Web UI | TLS via nginx | Bearer token (master or device-scoped) | M1 |
-| Native frame SSE | `/sse/*` | Cheap one-way clients, log tailers | TLS via nginx | Bearer | M1 |
-| HTTP + AES envelope | `/aes/*` | Bare-metal MCU (ESP32, STM32), no TLS stack | AES-256-GCM per-device key | API key + per-request nonce | M1 |
-| Anthropic-compatible API | `/v1/messages`, `stream=true` SSE | Existing Claude SDK clients — point base URL at the box, get subscription-backed Claude | TLS via nginx | Bearer / API key | **Shipped** (per-request session spawn, incremental streaming) |
-| OpenAI-compatible API | `/openai/v1/chat/completions` | Existing OpenAI SDK clients | TLS via nginx | Bearer / API key | **Shipped** (per-request session spawn, incremental streaming) |
-| Slim chat (embedded) | `/api/sessions/{id}/chat` REST, `/sse/sessions/{id}/chat` SSE, `/aes/sessions/{id}/chat` over AES | MCU clients with a few hundred KB of RAM | TLS / AES envelope | Bearer / AES key | **Shipped** |
-| Send-and-wait | `POST /api/sessions/{id}/send` | One HTTP round-trip per turn for non-streaming clients | TLS via nginx | Bearer | **Shipped** |
-| Port mapping | `GET/POST/DELETE /api/ports/*` | Surface an in-container service on a host port via socat | TLS via nginx | Bearer | **Shipped** (requires `CIB_PORT_RANGE` on docker run) |
-| MQTT bridge | — | IoT bus integrations | TLS or pre-shared | Per topic | Roadmap |
-| Raw TCP framed | — | Absolute minimum footprint | AES-GCM | API key | Roadmap |
+| Wrapping | Path prefix | Best for | Crypto | Auth |
+|----------|-------------|----------|--------|------|
+| Native frame REST + WS | `/api/*`, `/ws/*` | Browser, phone, server, our Web UI | TLS via nginx | Bearer token (master or device-scoped) |
+| Native frame SSE | `/sse/*` | Cheap one-way clients, log tailers | TLS via nginx | Bearer |
+| HTTP + AES envelope | `/aes/*` | Bare-metal MCU (ESP32, STM32) without a TLS stack | AES-256-GCM per-device key, v2 record-stream | API key + per-request nonce |
+| Anthropic-compatible API | `/v1/messages` (+ `stream=true` SSE) | `@anthropic-ai/sdk` etc. — point `base_url` at the box and get subscription-backed Claude | TLS via nginx | Bearer / API key |
+| OpenAI-compatible API | `/openai/v1/chat/completions` | `openai` / `openai-node` — same idea, OpenAI wire shape | TLS via nginx | Bearer / API key |
+| Slim chat (embedded) | `/api/sessions/{id}/chat`, `/sse/sessions/{id}/chat`, `/aes/sessions/{id}/chat` | MCU clients with a few hundred KB of RAM | TLS / AES envelope | Bearer / AES key |
+| Send-and-wait | `POST /api/sessions/{id}/send` | One HTTP round-trip per turn for non-streaming clients | TLS via nginx | Bearer |
+| Port mapping | `/api/ports/*` | Surface an in-container service on a host port via socat (needs `CIB_PORT_RANGE` on `docker run`) | TLS via nginx | Bearer |
+| MQTT bridge | — | IoT bus integrations (not yet built) | TLS or pre-shared | Per topic |
+| Raw TCP framed | — | Absolute minimum footprint (not yet built) | AES-GCM | API key |
 
 The Anthropic- and OpenAI-compatible adapters are **format adapters over the same session bus**, not parallel runtimes. They let any tool that already speaks those APIs route through the box and pick up subscription-backed Claude.
 
@@ -166,16 +165,13 @@ Set `CIB_PROXY_URL=socks5://user:pass@host:port` once at boot and every outbound
 The server side is intentionally **not** sized for embedded hosts — running CC in interactive mode against subscription quota wants a real machine. What is embedded-friendly is the **client** side:
 
 - The AES envelope HTTP transport is designed so an ESP32 / STM32 / RP2040 with only an HTTP client and an AES-GCM implementation can be a first-class participant: send input to a session, poll for structured frames, react to todos / stop events.
-- A reference C client lives at [`clients/c/`](clients/) (mbedtls-based, ~300 LOC), with a sibling ESP-IDF example.
-- Rust and Python reference clients follow in M3.
+- A reference C client lives at [`clients/c/`](clients/c/) (mbedtls + libcurl, ~300 LOC), with a sibling ESP-IDF example.
+- A reference Python client lives at [`clients/python/`](clients/python/) (stdlib + `cryptography`, ~250 LOC, with tests).
+- A Rust reference client is the next on the list.
 
-## Status
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the system in more depth.
 
-Very early. The repository currently holds the project name, logo, architecture sketch, nginx template, and the AES envelope protocol spec. Implementation is in progress under the milestones below. Star or watch to follow along.
-
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the planned shape of the system in more depth.
-
-## Planned architecture (high level)
+## Architecture (high level)
 
 ```
                                                        ┌────────────────────────────────────────────┐
@@ -219,24 +215,26 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the planned shape of the 
 ## Quick start
 
 ```bash
-# placeholder command shape; container does not exist yet.
 docker run -d --name claude-box \
   -p 8080:8080 \
   --cap-add NET_ADMIN \
   -e CIB_AUTH_TOKEN=$(openssl rand -hex 32) \
-  -e CLAUDE_CODE_OAUTH_TOKEN=cclo_...      # from `claude setup-token` on your laptop
+  -e CLAUDE_CODE_OAUTH_TOKEN=cclo_...               `# from \`claude setup-token\` on your laptop` \
   -e CIB_PROXY_URL=socks5://user:pass@proxy.example:1080 \
-  -e CIB_SERVICES=redis,postgres \         # auto-start bundled services
+  -e CIB_SERVICES=redis,postgres                    `# auto-start bundled services` \
+  -e CIB_PORT_RANGE=9000-9019 -p 9000-9019:9000-9019 `# optional: expose in-container services on host ports` \
   -v $(pwd)/workspace:/workspace \
   -v $(pwd)/sessions:/var/lib/claude-in-box/sessions \
   -v $(pwd)/claude-home:/home/coder/.claude \
-  -v /var/run/docker.sock:/var/run/docker.sock \   # optional: talk to host Docker
+  -v /var/run/docker.sock:/var/run/docker.sock      `# optional: talk to host Docker` \
   ghcr.io/jiangmuran/claude-in-box:latest
 
 open http://localhost:8080
 ```
 
-API-only mode (no Web UI served on `/`, only `/api/*` `/ws/*` `/sse/*` `/aes/*`) — same image, just a runtime mode:
+The master token (`CIB_AUTH_TOKEN`) is what you paste into the Web UI on first visit; mint device-scoped tokens from there.
+
+API-only mode (no Web UI on `/`, only `/api/*` `/ws/*` `/sse/*` `/aes/*` `/v1/*` `/openai/v1/*`) — same image, just a runtime flag:
 
 ```bash
 docker run -d --restart unless-stopped \
@@ -253,7 +251,7 @@ Implementing the AES envelope on a microcontroller: see [`docs/AES-TRANSPORT.md`
 
 ## Contributing
 
-Not yet open for contributions; the design is still settling. Open an issue if something resonates or if you have a target client device with constraints we should keep in mind.
+Open an issue if something resonates, you hit a bug, or you have a target client device with constraints worth designing around. PRs welcome — small focused changes preferred over sweeping refactors.
 
 ## License
 

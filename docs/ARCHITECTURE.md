@@ -1,6 +1,6 @@
-# Architecture (sketch)
+# Architecture
 
-> Status: design draft. Names, file layouts, and APIs will move. The goal here is to capture the shape of the system clearly enough that someone reading the repo for the first time understands what we are building.
+Companion to the README. Read the README first for the what and why; this doc covers the how. Names and layouts here match what the binary actually does.
 
 ## Components
 
@@ -8,7 +8,7 @@
 
 A Debian-slim image with:
 
-- Language runtimes: Node 20 LTS, Python 3 (plus FastAPI / Uvicorn / Pydantic / httpx / requests / pytest / rich / ipython3 from Debian packages), Go (current stable from go.dev), Rust (`rustc` / `cargo`).
+- Language runtimes: Node 22 LTS, Python 3 (plus FastAPI / Uvicorn / Pydantic / httpx / requests / pytest / rich / ipython3 from Debian packages), Go (current stable from go.dev), Rust (`rustc` / `cargo`).
 - Bundled services: `nginx-light`, `redis-server`, `postgresql` (+ `postgresql-client`), `docker.io` (CLI + daemon). None auto-start; the entrypoint reads `CIB_SERVICES` (comma-separated list of any of `redis`, `postgres`, `nginx`, `docker`) and brings up only what is requested. `cib-services {start,stop,status} <svc[,svc...]>` is also available from inside a session.
 - Common dev tools: `ripgrep`, `fd-find`, `bat`, `htop`, `tmux`, `vim`, `nano`, `openssh-client`, `less`, `file`, `tree`, `jq`, `curl`, `wget`, `make`, `build-essential`.
 - `claude` CLI preinstalled and pinned to a known version.
@@ -82,10 +82,10 @@ Two modes coexist; subscription is the default for personal use because it is wh
 - Claude Code inside the container, running interactive, treats this as a logged-in session and bills against the Anthropic subscription. No `~/.claude/.credentials.json` refresh-token gymnastics inside the container.
 - `~/.claude/` is still mounted as a volume so transcripts, settings, and MCP config persist across restarts.
 
-**Subscription via in-container interactive `claude /login` (M3).**
+**Subscription via in-container interactive `claude /login`.**
 
 - For users who do not want to handle `claude setup-token` on the host.
-- The Web UI drives a PTY-backed `claude /login` flow inside the container, with an OAuth callback route on the control plane to receive the auth code.
+- The Web UI's unified auth modal drives a PTY-backed `claude /login` flow inside the container end-to-end (start → paste code → finish).
 
 **API key.**
 
@@ -159,15 +159,15 @@ For shops already on an MQTT bus. Each session's structured frames are republish
 
 Length-prefixed framing over a raw TCP socket with AES-GCM payloads, for the absolute-minimum-footprint case.
 
-#### 7.7 Anthropic-compatible API (M3)
+#### 7.7 Anthropic-compatible API
 
-`POST /v1/messages` and `POST /v1/messages?stream=true` mimic `api.anthropic.com`. Incoming Messages-API-shaped requests are translated to an ephemeral or named session under the hood; outgoing events come back as Anthropic-shaped `message`, `content_block_delta`, `message_delta` SSE chunks.
+`POST /v1/messages` (with optional `stream=true` SSE) mimics `api.anthropic.com`. Incoming Messages-API-shaped requests spawn a per-request session under the hood; outgoing events come back as Anthropic-shaped `message_start` / `content_block_delta` / `message_delta` / `message_stop` SSE events, emitted incrementally as the assistant writes them.
 
-This is a **format adapter over the same session bus**, not a parallel runtime. The point is: any existing Claude SDK can set `base_url` to the box and transparently get subscription-backed Claude routed through it.
+This is a **format adapter over the same session bus**, not a parallel runtime. Any existing Claude SDK can point `base_url` at the box and transparently route through subscription-backed Claude.
 
-#### 7.8 OpenAI-compatible API (M3)
+#### 7.8 OpenAI-compatible API
 
-`POST /openai/v1/chat/completions` accepts OpenAI Chat Completions request shape, returns OpenAI-shaped chunks. Same underlying session, mostly field renaming plus tool-call translation. Lets any tool that already speaks the OpenAI API target the box.
+`POST /openai/v1/chat/completions` accepts the OpenAI Chat Completions request shape and returns `chat.completion` / `chat.completion.chunk` responses. Same underlying session, system messages folded into Anthropic's `system` field. Lets `openai`, `openai-node`, langchain, and friends target the box with no SDK changes.
 
 ### 8. Attach
 
@@ -229,7 +229,7 @@ The Web UI surfaces **three concurrent views** on the same underlying session. A
 
 All three views read from the same frame bus; switching between them does not interrupt the session.
 
-In `headless` mode this layer is absent; `/` returns 404, and only `/api/*`, `/ws/*`, `/sse/*`, `/aes/*`, `/v1/messages*` (when M3 lands), and `/openai/v1/chat/completions` (M3) are served.
+In `headless` mode this layer is absent; `/` returns 404, and only `/api/*`, `/ws/*`, `/sse/*`, `/aes/*`, `/v1/messages*`, and `/openai/v1/chat/completions` are served.
 
 ### 12. REST API (sketch)
 
@@ -259,21 +259,21 @@ GET    /api/usage                      ?since&until&group_by=session|model|auth
 WS     /api/sessions/:id/stream        ?from=<seq>
 SSE    /api/sessions/:id/events        ?from=<seq>
 
-POST   /aes/sessions/:id/input         AES envelope, see AES-TRANSPORT.md
-POST   /aes/sessions/:id/events/poll   AES envelope, long-poll for frames
-... (mirror of /api/* under /aes/*)
+POST   /aes/sessions/:id/input            AES v2 record envelope (see AES-TRANSPORT.md)
+POST   /aes/sessions/:id/chat             AES v2 — slim chat list, supports `since` cursor
+POST   /aes/sessions/:id/events/stream    AES v2 — chunked record stream of frames
 
-# Format adapters (M3)
-POST   /v1/messages                            Anthropic Messages API (non-stream)
-POST   /v1/messages?stream=true                Anthropic Messages API (SSE)
-POST   /openai/v1/chat/completions             OpenAI Chat Completions (with stream flag)
+# Format adapters
+POST   /v1/messages                       Anthropic Messages API (non-stream)
+POST   /v1/messages?stream=true           Anthropic Messages API (SSE, incremental)
+POST   /openai/v1/chat/completions        OpenAI Chat Completions (with stream flag)
 ```
 
 All routes except `/api/health`, `/aes/time`, and `/aes/keyinfo` require auth (§10). The Anthropic- and OpenAI-compatible adapters accept either a bearer token or the API key in the original SDK's expected header.
 
 ### 13. API-only ("headless") runtime mode
 
-`CIB_MODE=headless` flips a single switch in the control plane: `/` returns 404, the Web UI bundle is not served, and only the API surfaces are exposed (`/api/*`, `/ws/*`, `/sse/*`, `/aes/*`, plus M3 format adapters). The image is the same `:latest` — there is no second tag.
+`CIB_MODE=headless` flips a single switch in the control plane: `/` returns 404, the Web UI bundle is not served, and only the API surfaces are exposed (`/api/*`, `/ws/*`, `/sse/*`, `/aes/*`, plus the Anthropic / OpenAI format adapters). The image is the same `:latest` — there is no second tag.
 
 Recommended for: CI runners, agent-only deployments, machines that should never expose a human-facing UI.
 
@@ -296,8 +296,9 @@ docker run -d --restart unless-stopped \
 The server is intentionally **not** sized for embedded hosts — running CC in interactive mode against subscription quota wants a real machine. What is embedded-friendly is the *client*.
 
 - **AES envelope** (§7.2) is designed so an ESP32 / STM32 / RP2040 with only an HTTP client and an AES-GCM implementation can be a first-class participant.
-- **Polling events endpoint** (`POST /aes/sessions/:id/events/poll`) means the device never needs to hold a long-lived socket open; it can wake every few seconds, fetch any new frames since `from=<seq>`, and go back to sleep.
-- A reference C client lives at `clients/c/` (mbedtls-based, ~300 LOC), with a sibling ESP-IDF example. Rust and Python reference clients land in M3.
+- **Record-stream events endpoint** (`POST /aes/sessions/:id/events/stream`) lets the device decrypt and render frames as they arrive, while keeping peak RAM at one record (≤ 4 KiB plaintext) regardless of total response size. Heartbeats land every few seconds during idle waits.
+- A reference C client lives at `clients/c/` (mbedtls + libcurl, ~300 LOC); ESP-IDF example beside it.
+- A reference Python client lives at `clients/python/` (stdlib + `cryptography`, ~250 LOC, with tests). A Rust client is the next on the list.
 - Devices identify themselves with a device-scoped token minted by the admin (§10) and each gets its own scope set, revocable independently.
 
 ## Open questions

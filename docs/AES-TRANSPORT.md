@@ -144,6 +144,55 @@ Devices should:
 - keep a monotonic clock or sync via `/aes/time`,
 - on `409 ReplayedNonce`, generate a fresh stream id and retry once.
 
+## Deployment shapes
+
+The whole `/aes/*` surface is multiplexed onto the same container port
+(`:8080` inside) as the bearer-authenticated REST + WebSocket + SSE.
+How that port is published to your devices is an operator decision.
+Three common shapes:
+
+### A. One external port, HTTPS (preferred when the device has TLS)
+
+```
+ESP32 (mbedtls) ─── https://box.example.com/aes/* ─── nginx :443 ─── cib :8080
+```
+
+- One port out. NAT-friendly (443 is almost always open).
+- Devices need ~150 KB of mbedtls + the host's root cert.
+- Use this when the device can already do TLS (ESP32-IDF, RP2040 with
+  mbed-tls, any Linux SBC).
+
+### B. One external port, plain HTTP (no TLS at all)
+
+```
+ESP32 (no TLS) ─── http://box.example.com/aes/* ─── cib :8080 (direct)
+```
+
+- Drop nginx entirely. `docker run -p 80:8080 ...`.
+- Smallest device firmware: just an HTTP client + AES-GCM.
+- The AES envelope provides confidentiality + integrity + replay
+  protection on its own; you do not need TLS underneath.
+- Use this when the device cannot afford TLS code or the network path
+  is already trusted.
+
+### C. Two external ports (`:80` plain HTTP for `/aes/`, `:443` HTTPS for everything else)
+
+```
+Browser  ─── https://box.example.com/ ────── nginx :443 ─┐
+ESP32    ─── http://box.example.com/aes/* ── nginx :80  ─┴── cib :8080
+```
+
+- nginx on `:80` passes `/aes/` straight through and 301-redirects
+  everything else to `:443`. Template:
+  [`deploy/nginx.conf.template`](../deploy/nginx.conf.template).
+- Browsers get TLS; MCU devices skip it. Both audiences served by the
+  same backend.
+- Use this when you have both kinds of client and want to keep the
+  certificate-free `/aes/` path.
+
+In every shape the container exposes one TCP port; everything is HTTP
+routing on top.
+
 ## Bootstrap
 
 The very first connection from a device cannot rely on prior state. Two cleartext helper endpoints exist for bootstrap:

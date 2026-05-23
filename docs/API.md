@@ -620,7 +620,14 @@ For embedded clients (ESP32, STM32) that cannot afford TLS. AES-256-GCM
 record stream — the entire request and response bodies are sequences of
 independently authenticated records terminated by a sentinel, so the
 device never needs to buffer more than one record's plaintext (≤ 4 KiB).
-See [docs/AES-TRANSPORT.md](AES-TRANSPORT.md) for the full wire format.
+See [docs/AES-TRANSPORT.md](AES-TRANSPORT.md) for the full wire format
+and a worked example.
+
+The same `/aes/*` paths are reachable over plain HTTP, HTTPS, or both;
+the envelope crypto is independent of the outer transport. See
+[Deployment shapes](AES-TRANSPORT.md#deployment-shapes) in the AES
+spec for the three common nginx configurations (one-port HTTPS,
+one-port plain HTTP, two-port 80+443).
 
 Cleartext bootstrap:
 

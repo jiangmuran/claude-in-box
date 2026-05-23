@@ -201,7 +201,17 @@ anything else ─╯
 
 - A master API key is minted at container boot via `CIB_AUTH_TOKEN`. The control plane refuses to start without one (`CIB_AUTH_DISABLED=1` overrides for local dev).
 - Device tokens are minted by the admin: `POST /api/tokens { label, scopes, ttl? }`. Each device (phone, MCU, CI runner) gets its own token, revocable independently.
-- Scopes are coarse (`sessions:read`, `sessions:write`, `hooks:write`, `tokens:admin`, …) and enforced at the route layer.
+- Scopes are coarse-grained and enforced at the route layer. The current set:
+  `sessions:read`, `sessions:write`, `sessions:input`,
+  `shells:read`, `shells:write`, `shells:input`,
+  `fs:read`, `fs:write`,
+  `providers:read`, `providers:write`,
+  `prefs:read`, `prefs:write`,
+  `ports:read`, `ports:write`,
+  `hooks:read`, `hooks:write`,
+  `tokens:read`, `tokens:write`,
+  `proxy:read`, `usage:read`.
+  See [`docs/API.md`](API.md) for the per-route mapping.
 - WebSocket auth in `Sec-WebSocket-Protocol: bearer.<token>` to keep tokens out of URL logs; `?token=...` accepted for clients that cannot set subprotocols.
 - OIDC is planned via a fronting reverse proxy (oauth2-proxy / authelia); the control plane honors `X-Forwarded-User` and `X-Forwarded-Email`.
 
@@ -312,6 +322,49 @@ The server is intentionally **not** sized for embedded hosts — running CC in i
 - **UDP through SOCKS5.** Pure SOCKS5 UDP support is patchy; tun2socks is heavier but more robust. Pick one before promising "all UDP works."
 - **Subscription concurrency limits.** Claude.ai accounts have rate limits; the box should surface these clearly when they hit.
 - **AES envelope key rotation.** First cut: rotate by minting a new device token and retiring the old. A formal key-derivation rotation may follow.
+
+## Environment variables (reference)
+
+Every knob the container reads at boot, in one place.
+
+### Required
+
+| Var | Effect |
+|---|---|
+| `CIB_AUTH_TOKEN` | Master bearer token. Pasted into the Web UI on first visit; used to mint device-scoped tokens. The control plane refuses to start without it (override only for local dev with `CIB_AUTH_DISABLED=1`). |
+
+### Mode + lifecycle
+
+| Var | Default | Effect |
+|---|---|---|
+| `CIB_MODE` | `default` | `default` serves Web UI on `/`; `headless` returns 404 on `/` and only exposes the API surfaces. |
+| `CIB_AUTH_DISABLED` | unset | If `1`, the master-token requirement is skipped. Local dev only. |
+| `CIB_RUN_AS_ROOT` | unset | If `1`, entrypoint stays as root instead of dropping to `coder`. Tests + recovery only. |
+| `CIB_SERVICES` | unset | Comma-separated list (subset of `redis`, `postgres`, `nginx`, `docker`) of bundled services to auto-start before the control plane. |
+
+### Network
+
+| Var | Default | Effect |
+|---|---|---|
+| `CIB_PROXY_URL` | unset | `socks5://[user:pass@]host:port` to route all outbound TCP from inside the container through. Implemented via `redsocks` + `nftables`. |
+| `CIB_DNS_OVER_TCP` | unset | If set, force DNS resolution over TCP for everything inside the container (useful when the SOCKS5 upstream doesn't pass UDP). |
+| `CIB_PORT_RANGE` | unset | `lo-hi` host port range the `/api/ports/expose` feature may use to forward in-container services. Set to `""` to disable that feature. The accompanying `docker run -p $LO-$HI:$LO-$HI` opens the host side. |
+
+### Claude credentials
+
+| Var | Effect |
+|---|---|
+| `CLAUDE_CODE_OAUTH_TOKEN` | Long-lived OAuth token from `claude setup-token`. Legacy path; tokens issued by `setup-token` move to a separate Agent SDK billing quota after 2026-06-15 and stop drawing against the interactive subscription. Prefer the in-container interactive login flow driven by the Web UI. |
+| `ANTHROPIC_API_KEY` | API key fallback for sessions that don't carry one in their create request. |
+
+### Override / debug
+
+The control plane also honours a small set of override env vars used by tests and the per-session spawn pipeline:
+
+| Var | Effect |
+|---|---|
+| `CLAUDE_CODE_ATTRIBUTION_HEADER` | Set to `0` to disable Claude Code's per-request rotating `x-anthropic-billing-header`. cib auto-sets this when a session is configured against a third-party Anthropic-compatible host so the upstream's prompt cache key stays stable. Override via the session's `extra_env` to opt out. |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `1` by default for cib-spawned sessions; mutes Claude Code's optional outbound pings. |
 
 ## Non-goals (for now)
 

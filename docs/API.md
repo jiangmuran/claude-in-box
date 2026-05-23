@@ -17,6 +17,42 @@ same endpoints documented here.
 All examples below assume `BASE=https://a.hk1.clawf.run:8443`
 and the master token in `$T`.
 
+### Contents
+
+- [Auth](#auth) — tokens, scopes
+- [Health](#health)
+- [Sessions](#sessions) — CRUD, input, streaming, read models, send-and-wait
+- [Format adapters](#anthropic-messages-api-compatibility) — Anthropic `/v1/messages`, OpenAI `/openai/v1/chat/completions`
+- [Shells](#shells-plain-bash-vttys) — plain-bash vTTYs alongside Claude sessions
+- [Files](#files-constrained-file-browser) — workspace + claude-home + box-data
+- [Providers](#providers-third-party-endpoints) and [Preferences](#preferences) — third-party Anthropic-compatible endpoints, default auth
+- [Claude auth](#in-container-claude-auth) — in-container OAuth login
+- [Port mapping](#port-mapping--expose-an-in-container-service-on-a-host-port)
+- [AES envelope](#aes-envelope-aes) — embedded transport (bootstrap, management, data plane)
+- [Internal hooks receiver](#internal-hooks-receiver) — for the `claude` child only
+- [Frame schema](#frame-schema) — what comes out of `/ws`, `/sse`, `/transcript`, `/messages`
+- [Errors](#errors)
+- [Implementation pointers](#implementation-pointers)
+
+A few endpoint pairs intentionally cover the same data with different
+shapes for different clients:
+
+- **Transcript** (`/transcript`) — raw typed frame list with the full
+  per-frame schema, for replay or audit.
+- **Messages** (`/messages`) — the same data collapsed into chat-style
+  bubbles (text deltas merged, tool calls joined to their results).
+  What the Web UI's "driver" view renders.
+- **Chat** (`/chat`, `/sse/.../chat`, `/aes/.../chat`) — slim shape
+  trimmed for MCU-class clients: user / assistant text + one-line tool
+  summaries, with cursor-based incremental polling.
+
+Title / goal / running usage totals are first-class fields on `Session`
+(set by the AES management surface; see
+[AES envelope](#aes-envelope-aes)). The bearer REST surface returns
+them on `GET /api/sessions/{id}` but does not yet expose a mutator —
+clients that need to write them go through `PUT /aes/sessions/{id}/metadata`
+or wait for the bearer equivalent (tracked as a follow-up).
+
 ---
 
 ## Auth

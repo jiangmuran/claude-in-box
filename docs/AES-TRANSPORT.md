@@ -151,31 +151,7 @@ The whole `/aes/*` surface is multiplexed onto the same container port
 How that port is published to your devices is an operator decision.
 Three common shapes:
 
-### A. One external port, HTTPS (preferred when the device has TLS)
-
-```
-ESP32 (mbedtls) ─── https://box.example.com/aes/* ─── nginx :443 ─── cib :8080
-```
-
-- One port out. NAT-friendly (443 is almost always open).
-- Devices need ~150 KB of mbedtls + the host's root cert.
-- Use this when the device can already do TLS (ESP32-IDF, RP2040 with
-  mbed-tls, any Linux SBC).
-
-### B. One external port, plain HTTP (no TLS at all)
-
-```
-ESP32 (no TLS) ─── http://box.example.com/aes/* ─── cib :8080 (direct)
-```
-
-- Drop nginx entirely. `docker run -p 80:8080 ...`.
-- Smallest device firmware: just an HTTP client + AES-GCM.
-- The AES envelope provides confidentiality + integrity + replay
-  protection on its own; you do not need TLS underneath.
-- Use this when the device cannot afford TLS code or the network path
-  is already trusted.
-
-### C. Two external ports (`:80` plain HTTP for `/aes/`, `:443` HTTPS for everything else)
+### C. Two external ports (recommended) — `:80` plain HTTP for `/aes/`, `:443` HTTPS for everything else
 
 ```
 Browser  ─── https://box.example.com/ ────── nginx :443 ─┐
@@ -184,14 +160,41 @@ ESP32    ─── http://box.example.com/aes/* ── nginx :80  ─┴── c
 
 - nginx on `:80` passes `/aes/` straight through and 301-redirects
   everything else to `:443`. Template:
-  [`deploy/nginx.conf.template`](../deploy/nginx.conf.template).
-- Browsers get TLS; MCU devices skip it. Both audiences served by the
-  same backend.
-- Use this when you have both kinds of client and want to keep the
-  certificate-free `/aes/` path.
+  [`deploy/nginx.conf.template`](../deploy/nginx.conf.template) —
+  ships with the right rules already.
+- Browsers get TLS; MCU devices skip it entirely. Both audiences
+  served by the same backend on the same hostname.
+- **This is the default recommendation.** It keeps the firmware
+  footprint of the MCU small (no TLS stack) and the browser path
+  encrypted, with no DNS or hostname split between them.
 
-In every shape the container exposes one TCP port; everything is HTTP
-routing on top.
+### A. One external port, HTTPS
+
+```
+ESP32 (mbedtls) ─── https://box.example.com/aes/* ─── nginx :443 ─── cib :8080
+```
+
+- Only port 443 open. NAT-friendly if 80 is blocked upstream.
+- Devices need ~150 KB of mbedtls + the host's root cert. Acceptable
+  on ESP32-IDF, RP2040 with mbed-tls, or any Linux SBC.
+- Use this only when the deployment really cannot expose `:80`.
+
+### B. One external port, plain HTTP
+
+```
+ESP32 (no TLS) ─── http://box.example.com/aes/* ─── cib :8080 (direct)
+```
+
+- Drop nginx entirely. `docker run -p 80:8080 ...`.
+- Smallest firmware: just an HTTP client + AES-GCM.
+- The AES envelope provides confidentiality, integrity, and replay
+  protection on its own; you do not need TLS underneath.
+- Trade-off: the bearer-authenticated `/api`, `/ws`, `/sse` paths
+  also end up cleartext. Fine for an isolated lab network or a
+  single-purpose box; risky on the open internet for those paths.
+
+In every shape the container exposes one TCP port; the differences are
+in the public-facing nginx layer.
 
 ## Bootstrap
 

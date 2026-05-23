@@ -13,6 +13,12 @@ HOST_PORT=${CIB_HOST_PORT:-8090}
 NAME=${CIB_NAME:-cib-test}
 DATA=/opt/claude-in-box
 
+# Pre-allocated host port range for the /api/ports/expose feature
+# (lets sessions surface in-container services like vite, fastapi etc.
+# without rebuilding the docker run line). Set CIB_PORT_RANGE="" to
+# disable; the /api/ports/* endpoints then return 503.
+PORT_RANGE=${CIB_PORT_RANGE:-9000-9019}
+
 log() { printf '[remote-deploy] %s\n' "$*" >&2; }
 
 if [[ ! -s "$DATA/secrets/cib.env" ]]; then
@@ -26,12 +32,21 @@ docker pull "$IMAGE"
 log "stopping any previous container"
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
-log "running $NAME on host port :$HOST_PORT"
+port_args=( -p "$HOST_PORT:8080" )
+env_args=()
+if [[ -n "$PORT_RANGE" ]]; then
+    log "exposing host port range $PORT_RANGE for /api/ports/expose"
+    port_args+=( -p "$PORT_RANGE:$PORT_RANGE" )
+    env_args+=( -e "CIB_PORT_RANGE=$PORT_RANGE" )
+fi
+
+log "running $NAME on host port :$HOST_PORT (range: ${PORT_RANGE:-none})"
 docker run -d \
     --name "$NAME" \
     --restart unless-stopped \
     --cap-add NET_ADMIN \
-    -p "$HOST_PORT:8080" \
+    "${port_args[@]}" \
+    "${env_args[@]}" \
     --env-file "$DATA/secrets/cib.env" \
     -v "$DATA/workspace:/workspace" \
     -v "$DATA/sessions:/var/lib/claude-in-box/sessions" \

@@ -216,6 +216,20 @@ func (m *Manager) Spawn(ctx context.Context, opts SpawnOptions) (*Session, error
 		}
 	}()
 
+	// Goroutine: actively look for claude's transcript JSONL file
+	// under ~/.claude/projects/<encoded-workdir>/ and start the
+	// cctranscript watcher as soon as it appears. This complements
+	// (and races with) the hook-driven start in EmitHookFrame —
+	// whichever finds the path first wins, the other becomes a
+	// no-op via the transcriptStop guard. Without this fallback,
+	// any session whose hooks don't fire (or whose hook payload
+	// doesn't include transcript_path) gets no text.delta frames
+	// at all, which means subscribers see status + stop but no
+	// actual claude reply text. Interactive claude REPL is the
+	// most affected case — its hooks often skip transcript_path.
+	spawnTime := time.Now().Add(-2 * time.Second) // small grace for fs clock skew
+	go startTranscriptWatcher(sess, opts.Workdir, spawnTime)
+
 	// Goroutine: wait for the process to exit; tear down.
 	go m.reap(sess)
 
@@ -511,6 +525,97 @@ func (m *Manager) EmitHookFrame(sessionID, event string, payload json.RawMessage
 	}
 
 	return nil
+}
+
+// startTranscriptWatcher polls ~/.claude/projects/<encoded-workdir>/
+// for a .jsonl session log appearing after `since`, then attaches the
+// cctranscript watcher to it. Returns immediately if another caller
+// already started a watcher for this session (the hook-driven path in
+// EmitHookFrame).
+//
+// Polls every 300 ms for up to 90 s. After 90 s we give up — by then
+// the session is either dead or in an unusual state, and the hook
+// path remains active for any future event that does carry a
+// transcript_path.
+func startTranscriptWatcher(sess *Session, workdir string, since time.Time) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	// claude encodes its project dir as the absolute workdir with
+	// every '/' replaced by '-'. Resolve to absolute first so a
+	// session created with a relative path still hits the right dir.
+	abs := workdir
+	if !filepath.IsAbs(abs) {
+		if a, err := filepath.Abs(abs); err == nil {
+			abs = a
+		}
+	}
+	encoded := strings.ReplaceAll(filepath.Clean(abs), "/", "-")
+	projDir := filepath.Join(home, ".claude", "projects", encoded)
+
+	deadline := time.Now().Add(90 * time.Second)
+	ticker := time.NewTicker(300 * time.Millisecond)
+	defer ticker.Stop()
+
+	var path string
+	for time.Now().Before(deadline) {
+		select {
+		case <-sess.done:
+			return // session ended before we found the file
+		case <-ticker.C:
+		}
+		entries, derr := os.ReadDir(projDir)
+		if derr != nil {
+			continue // dir not created yet
+		}
+		var newest string
+		var newestMTime time.Time
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+				continue
+			}
+			info, ierr := e.Info()
+			if ierr != nil {
+				continue
+			}
+			if info.ModTime().Before(since) {
+				continue // pre-existing transcript from a prior run
+			}
+			if info.ModTime().After(newestMTime) {
+				newestMTime = info.ModTime()
+				newest = filepath.Join(projDir, e.Name())
+			}
+		}
+		if newest != "" {
+			path = newest
+			break
+		}
+	}
+	if path == "" {
+		return
+	}
+	sess.mu.Lock()
+	if sess.transcriptStop != nil {
+		sess.mu.Unlock()
+		return // hook beat us to it
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	w := cctranscript.New(path, busAdapter{sess.bus})
+	w.OnInit = func(claudeSID, model, _ string) {
+		sess.mu.Lock()
+		if sess.ClaudeSessionID == "" {
+			sess.ClaudeSessionID = claudeSID
+		}
+		if model != "" && sess.Model == "" {
+			sess.Model = model
+		}
+		sess.mu.Unlock()
+		_ = sess.writeMeta()
+	}
+	w.Start(ctx)
+	sess.transcriptStop = cancel
+	sess.mu.Unlock()
 }
 
 // busAdapter satisfies cctranscript.Publisher around a *stream.Bus.

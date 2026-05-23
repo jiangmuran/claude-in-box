@@ -128,6 +128,18 @@ Every frame carries `session`, `seq`, `ts`, `kind`, `data`. Frame ordering is gl
 
 Parsing strategy: we capture lifecycle events from hook callbacks and content frames from the transcript watcher — never by parsing the TTY. The `pty.raw` channel exists only for clients that want to render the original terminal UI verbatim.
 
+**Where structured frames come from.** Two paths feed the session bus:
+
+1. **PTY parser** — `internal/stream.Parser.RunRaw` consumes the child's terminal bytes and emits `pty.raw` frames (plus lifecycle frames like `status` when `Session.SetState` is called). This is always on.
+2. **Transcript watcher** — `internal/cctranscript.Watcher` tails Claude's own `~/.claude/projects/<encoded-workdir>/<session_id>.jsonl` file and translates each line into typed frames: `text.delta`, `thinking`, `tool.use.start`, `tool.use.result`, `todo.update`, `usage`. This is where the "actual content" frames come from — without the watcher, subscribers see lifecycle but no assistant text.
+
+The watcher needs a path to tail. Two start paths cooperate in `internal/session/manager.go`:
+
+- **Auto-discovery** (`startTranscriptWatcher`, runs from `Manager.Spawn`): polls `~/.claude/projects/<encoded-workdir>/` every 300 ms for up to 90 s, looking for a `.jsonl` file whose mtime is after spawn. Independent of any hook firing.
+- **Hook-driven** (in `Session.EmitHookFrame`): when a hook payload carries a `transcript_path` field, the watcher starts from that path. Useful when the auto-discovery encoding doesn't match (e.g. claude rewrites the project dir).
+
+Both paths check `Session.transcriptStop` and skip if a watcher already exists — whichever finds the file first wins. After 90 s the auto-discovery goroutine exits but the hook path remains armed, so a delayed hook with `transcript_path` can still bring the watcher up later in the session's life.
+
 ### 7. Transports
 
 Each capability is exposed across multiple transports so very different devices can use the same backend.

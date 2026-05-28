@@ -56,6 +56,7 @@
       providers = r.providers
       // If the saved default no longer exists, clear it.
       if (providerId && !providers.find((p) => p.id === providerId)) providerId = ''
+      if (authMode === 'api_key' && !providerId && providers.length > 0) providerId = providers[0].id
     } catch { /* ignore */ }
   }
 

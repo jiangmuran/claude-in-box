@@ -35,27 +35,37 @@ start_redis() {
 }
 
 start_postgres() {
-    local PG_BIN PG_VER PG_DATA
-    PG_BIN=$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1)
-    if [[ -z "${PG_BIN}" ]]; then
-        log "postgres binaries not found"
+    local pg_ver pg_hba
+
+    if ! command -v pg_lsclusters >/dev/null 2>&1 || ! command -v pg_ctlcluster >/dev/null 2>&1 || ! command -v pg_conftool >/dev/null 2>&1; then
+        log "postgres cluster management commands not found"
         return 1
     fi
-    PG_VER=$(basename "$(dirname "$PG_BIN")")
-    PG_DATA=/var/lib/postgresql/${PG_VER}/main
 
-    if [[ ! -s "${PG_DATA}/PG_VERSION" ]]; then
-        log "initialising postgres cluster at ${PG_DATA}"
-        install -d -o postgres -g postgres -m 0700 "${PG_DATA}"
-        su postgres -c "${PG_BIN}/initdb -D '${PG_DATA}' --auth-local=trust --auth-host=md5 --username=postgres"
-        # Listen on all interfaces so other containers in the same network
-        # can reach it, but keep host-based auth conservative.
-        echo "listen_addresses = '*'" >> "${PG_DATA}/postgresql.conf"
-        echo "host all all 0.0.0.0/0 md5" >> "${PG_DATA}/pg_hba.conf"
+    pg_ver=$(pg_lsclusters --no-header | awk '$2 == "main" { print $1 }' | sort -V | tail -1)
+    if [[ -z "${pg_ver}" ]]; then
+        log "postgres main cluster not found"
+        return 1
     fi
 
-    log "starting postgres ${PG_VER} on :5432"
-    su postgres -c "${PG_BIN}/pg_ctl -D '${PG_DATA}' -l '${LOG_DIR}/postgres.log' -w start"
+    pg_hba=/etc/postgresql/${pg_ver}/main/pg_hba.conf
+    if [[ ! -f "${pg_hba}" ]]; then
+        log "postgres pg_hba.conf not found at ${pg_hba}"
+        return 1
+    fi
+
+    pg_conftool "${pg_ver}" main set listen_addresses '*'
+    if ! grep -Fxq "host all all 0.0.0.0/0 md5" "${pg_hba}"; then
+        echo "host all all 0.0.0.0/0 md5" >> "${pg_hba}"
+    fi
+
+    if pg_lsclusters --no-header | awk '$1 == ver && $2 == "main" && $4 == "online" { found = 1 } END { exit found ? 0 : 1 }' ver="${pg_ver}"; then
+        log "postgres ${pg_ver} already running"
+        return
+    fi
+
+    log "starting postgres ${pg_ver} on :5432"
+    pg_ctlcluster "${pg_ver}" main start
 }
 
 start_nginx() {
@@ -89,9 +99,11 @@ stop_one() {
     case "$1" in
         redis)    pkill -x redis-server || true ;;
         postgres)
-            local PG_BIN
-            PG_BIN=$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1)
-            [[ -n "${PG_BIN}" ]] && su postgres -c "${PG_BIN}/pg_ctl -D /var/lib/postgresql/*/main stop -m fast" || true
+            if command -v pg_lsclusters >/dev/null 2>&1 && command -v pg_ctlcluster >/dev/null 2>&1; then
+                local pg_ver
+                pg_ver=$(pg_lsclusters --no-header | awk '$2 == "main" { print $1 }' | sort -V | tail -1)
+                [[ -n "${pg_ver}" ]] && pg_ctlcluster "${pg_ver}" main stop -- -m fast || true
+            fi
             ;;
         nginx)    pkill -x nginx || true ;;
         docker)   pkill -x dockerd || true ;;
